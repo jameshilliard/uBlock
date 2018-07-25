@@ -54,11 +54,6 @@
 µBlock.saveLocalSettings = (function() {
     let saveAfter = 4 * 60 * 1000;
 
-    let save = function(callback) {
-        this.localSettingsLastSaved = Date.now();
-        vAPI.storage.set(this.localSettings, callback);
-    };
-
     let onTimeout = ( ) => {
         let µb = µBlock;
         if ( µb.localSettingsLastModified > µb.localSettingsLastSaved ) {
@@ -69,7 +64,10 @@
 
     vAPI.setTimeout(onTimeout, saveAfter);
 
-    return save;
+    return function(callback) {
+        this.localSettingsLastSaved = Date.now();
+        vAPI.storage.set(this.localSettings, callback);
+    };
 })();
 
 /******************************************************************************/
@@ -1027,13 +1025,13 @@
 
     let create = function() {
         timer = null;
-        let selfie = {
+        let selfie = JSON.stringify({
             magic: µb.systemSettings.selfieMagic,
-            availableFilterLists: JSON.stringify(µb.availableFilterLists),
-            staticNetFilteringEngine: JSON.stringify(µb.staticNetFilteringEngine.toSelfie()),
-            redirectEngine: JSON.stringify(µb.redirectEngine.toSelfie()),
-            staticExtFilteringEngine: JSON.stringify(µb.staticExtFilteringEngine.toSelfie())
-        };
+            availableFilterLists: µb.availableFilterLists,
+            staticNetFilteringEngine: µb.staticNetFilteringEngine.toSelfie(),
+            redirectEngine: µb.redirectEngine.toSelfie(),
+            staticExtFilteringEngine: µb.staticExtFilteringEngine.toSelfie()
+        });
         vAPI.cacheStorage.set({ selfie: selfie });
     };
 
@@ -1041,16 +1039,25 @@
         vAPI.cacheStorage.get('selfie', function(bin) {
             if (
                 bin instanceof Object === false ||
-                bin.selfie instanceof Object === false ||
-                bin.selfie.magic !== µb.systemSettings.selfieMagic ||
-                bin.selfie.redirectEngine === undefined
+                typeof bin.selfie !== 'string'
             ) {
                 return callback(false);
             }
-            µb.availableFilterLists = JSON.parse(bin.selfie.availableFilterLists);
-            µb.staticNetFilteringEngine.fromSelfie(JSON.parse(bin.selfie.staticNetFilteringEngine));
-            µb.redirectEngine.fromSelfie(JSON.parse(bin.selfie.redirectEngine));
-            µb.staticExtFilteringEngine.fromSelfie(JSON.parse(bin.selfie.staticExtFilteringEngine));
+            let selfie;
+            try {
+                selfie = JSON.parse(bin.selfie);
+            } catch(ex) {
+            }
+            if (
+                selfie instanceof Object === false ||
+                selfie.magic !== µb.systemSettings.selfieMagic
+            ) {
+                return callback(false);
+            }
+            µb.availableFilterLists = selfie.availableFilterLists;
+            µb.staticNetFilteringEngine.fromSelfie(selfie.staticNetFilteringEngine);
+            µb.redirectEngine.fromSelfie(selfie.redirectEngine);
+            µb.staticExtFilteringEngine.fromSelfie(selfie.staticExtFilteringEngine);
             callback(true);
         });
     };

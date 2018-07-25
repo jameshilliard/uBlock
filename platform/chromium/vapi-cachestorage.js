@@ -1,7 +1,7 @@
 /*******************************************************************************
 
     uBlock Origin - a browser extension to block requests.
-    Copyright (C) 2016-2018 The uBlock Origin authors
+    Copyright (C) 2016-present The uBlock Origin authors
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
     Home: https://github.com/gorhill/uBlock
 */
 
-/* global indexedDB, IDBDatabase */
+/* global indexedDB, IDBDatabase, SnappyJS */
 
 'use strict';
 
@@ -48,13 +48,15 @@ vAPI.cacheStorage = (function() {
     }
 
     const STORAGE_NAME = 'uBlock0CacheStorage';
-    var db;
-    var pending = [];
+    let db;
+    let pending = [];
+    let textEncoder, textDecoder;
+    let api = { get, set, remove, clear, getBytesInUse, error: undefined };
 
     // prime the db so that it's ready asap for next access.
     getDb(noopfn);
 
-    return { get, set, remove, clear, getBytesInUse };
+    return api;
 
     function get(input, callback) {
         if ( typeof callback !== 'function' ) { return; }
@@ -90,8 +92,12 @@ vAPI.cacheStorage = (function() {
         callback(0);
     }
 
-    function genericErrorHandler(error) {
-        console.error('[%s]', STORAGE_NAME, error);
+    function genericErrorHandler(ev) {
+        let error = ev.target && ev.target.error;
+        if ( error && error.name === 'QuotaExceededError' ) {
+            api.error = error.name;
+        }
+        console.error('[%s]', STORAGE_NAME, error && error.name);
     }
 
     function noopfn() {
@@ -101,6 +107,71 @@ vAPI.cacheStorage = (function() {
         var cb;
         while ( (cb = pending.shift()) ) {
             cb(db);
+        }
+    }
+
+    function compressInput(input) {
+        let output = {};
+        for ( let key in input ) {
+            let item = input[key];
+            if ( typeof item !== 'string' || item.length < 8192 ) {
+                output[key] = item;
+                continue;
+            }
+            if ( textEncoder === undefined ) {
+                textEncoder = new TextEncoder();
+            }
+            let t0 = window.performance.now();
+            output[key] = new Blob([
+                SnappyJS.compress(textEncoder.encode(item))
+            ]);
+            let t1 = window.performance.now();
+            console.info(
+                'uBO: compressed %d bytes into %d bytes in %s ms',
+                item.length,
+                output[key].size,
+                (t1 - t0).toFixed(2)
+            );
+        }
+        return output;
+    }
+
+    function decompressInput(input, callback) {
+        let output = {};
+        let pendingItemCount = 0;
+        let countdown = function(key, ev) {
+            if ( textDecoder === undefined ) {
+                textDecoder = new TextDecoder();
+            }
+            let t0 = window.performance.now();
+            output[key] = textDecoder.decode(
+                SnappyJS.uncompress(ev.target.result)
+            );
+            let t1 = window.performance.now();
+            console.info(
+                'uBO: decompressed %d bytes into %d bytes in %s ms',
+                ev.target.result.byteLength,
+                output[key].length,
+                (t1 - t0).toFixed(2)
+            );
+            pendingItemCount -= 1;
+            if ( pendingItemCount === 0 ) {
+                callback(output);
+            }
+        };
+        for ( let key in input ) {
+            let item = input[key];
+            if ( item instanceof Blob === false ) {
+                output[key] = item;
+                continue;
+            }
+            pendingItemCount += 1;
+            let blobReader = new FileReader();
+            blobReader.onload = countdown.bind(blobReader, key);
+            blobReader.readAsArrayBuffer(item);
+        }
+        if ( pendingItemCount === 0 ) {
+            callback(output);
         }
     }
 
@@ -174,7 +245,7 @@ vAPI.cacheStorage = (function() {
             transaction.oncomplete =
             transaction.onerror =
             transaction.onabort = function() {
-                return callback(store);
+                return decompressInput(store, callback);
             };
             var table = transaction.objectStore(STORAGE_NAME);
             for ( var key of keys ) {
@@ -197,7 +268,7 @@ vAPI.cacheStorage = (function() {
             transaction.oncomplete =
             transaction.onerror =
             transaction.onabort = function() {
-                callback(output);
+                decompressInput(output, callback);
             };
             var table = transaction.objectStore(STORAGE_NAME),
                 req = table.openCursor();
@@ -222,14 +293,14 @@ vAPI.cacheStorage = (function() {
         }
         let keys = Object.keys(input);
         if ( keys.length === 0 ) { return callback(); }
+        input = compressInput(input);
         getDb(function(db) {
             if ( !db ) { return callback(); }
-            let finish = () => {
-                if ( callback !== undefined ) {
-                    let cb = callback;
-                    callback = undefined;
-                    cb();
-                }
+            let finish = ( ) => {
+                if ( callback === undefined ) { return; }
+                let cb = callback;
+                callback = undefined;
+                cb();
             };
             try {
                 let transaction = db.transaction(STORAGE_NAME, 'readwrite');
@@ -254,17 +325,27 @@ vAPI.cacheStorage = (function() {
         if ( typeof callback !== 'function' ) {
             callback = noopfn;
         }
-        var keys = Array.isArray(input) ? input.slice() : [ input ];
+        let keys = Array.isArray(input) ? input.slice() : [ input ];
         if ( keys.length === 0 ) { return callback(); }
         getDb(function(db) {
             if ( !db ) { return callback(); }
-            var transaction = db.transaction(STORAGE_NAME, 'readwrite');
-            transaction.oncomplete =
-            transaction.onerror =
-            transaction.onabort = callback;
-            var table = transaction.objectStore(STORAGE_NAME);
-            for ( var key of keys ) {
-                table.delete(key);
+            let finish = ( ) => {
+                if ( callback === undefined ) { return; }
+                let cb = callback;
+                callback = undefined;
+                cb();
+            };
+            try {
+                let transaction = db.transaction(STORAGE_NAME, 'readwrite');
+                transaction.oncomplete =
+                transaction.onerror =
+                transaction.onabort = finish;
+                let table = transaction.objectStore(STORAGE_NAME);
+                for ( let key of keys ) {
+                    table.delete(key);
+                }
+            } catch (ex) {
+                finish();
             }
         });
     }
@@ -275,10 +356,20 @@ vAPI.cacheStorage = (function() {
         }
         getDb(function(db) {
             if ( !db ) { return callback(); }
-            var req = db.transaction(STORAGE_NAME, 'readwrite')
-                        .objectStore(STORAGE_NAME)
-                        .clear();
-            req.onsuccess = req.onerror = callback;
+            let finish = ( ) => {
+                if ( callback === undefined ) { return; }
+                let cb = callback;
+                callback = undefined;
+                cb();
+            };
+            try {
+                let req = db.transaction(STORAGE_NAME, 'readwrite')
+                            .objectStore(STORAGE_NAME)
+                            .clear();
+                req.onsuccess = req.onerror = finish;
+            } catch (ex) {
+                finish();
+            }
         });
     }
 }());
