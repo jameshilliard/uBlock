@@ -19,7 +19,7 @@
     Home: https://github.com/gorhill/uBlock
 */
 
-/* global indexedDB, IDBDatabase, SnappyJS */
+/* global IDBDatabase, WebAssembly, indexedDB */
 
 'use strict';
 
@@ -43,22 +43,16 @@ vAPI.cacheStorage = (function() {
     // Firefox-specific: we use indexedDB because chrome.storage.local() has
     // poor performance in Firefox. See:
     // https://bugzilla.mozilla.org/show_bug.cgi?id=1371255
-    if ( vAPI.webextFlavor.soup.has('firefox') === false ) {
-        return vAPI.cacheStorage;
-    }
+    //if ( vAPI.webextFlavor.soup.has('firefox') === false ) {
+    //    return vAPI.cacheStorage;
+    //}
 
     const STORAGE_NAME = 'uBlock0CacheStorage';
     let db;
-    let pending = [];
+    let pendingInitialization;
     let textEncoder, textDecoder;
-    let api = { get, set, remove, clear, getBytesInUse, error: undefined };
 
-    // prime the db so that it's ready asap for next access.
-    getDb(noopfn);
-
-    return api;
-
-    function get(input, callback) {
+    let get = function get(input, callback) {
         if ( typeof callback !== 'function' ) { return; }
         if ( input === null ) {
             return getAllFromDb(callback);
@@ -73,120 +67,251 @@ vAPI.cacheStorage = (function() {
             output = input;
         }
         return getFromDb(toRead, output, callback);
-    }
+    };
 
-    function set(input, callback) {
+    let set = function set(input, callback) {
         putToDb(input, callback);
-    }
+    };
 
-    function remove(key, callback) {
+    let remove = function remove(key, callback) {
         deleteFromDb(key, callback);
-    }
+    };
 
-    function clear(callback) {
+    let clear = function clear(callback) {
         clearDb(callback);
-    }
+    };
 
-    function getBytesInUse(keys, callback) {
+    let getBytesInUse = function getBytesInUse(keys, callback) {
         // TODO: implement this
         callback(0);
-    }
+    };
 
-    function genericErrorHandler(ev) {
+    let api = { get, set, remove, clear, getBytesInUse, error: undefined };
+
+    let genericErrorHandler = function(ev) {
         let error = ev.target && ev.target.error;
         if ( error && error.name === 'QuotaExceededError' ) {
             api.error = error.name;
         }
         console.error('[%s]', STORAGE_NAME, error && error.name);
-    }
+    };
 
     function noopfn() {
     }
 
-    function processPendings() {
-        var cb;
-        while ( (cb = pending.shift()) ) {
-            cb(db);
-        }
-    }
+    let lz4 = (function() {
+        let lz4wasmInstance;
+        let pendingInitialization;
 
-    function compressInput(input) {
-        let output = {};
-        for ( let key in input ) {
-            let item = input[key];
-            if ( typeof item !== 'string' || item.length < 8192 ) {
-                output[key] = item;
-                continue;
+        let init = function() {
+            if ( lz4wasmInstance === null ) {
+                return Promise.resolve(null);
             }
+            if ( WebAssembly instanceof Object === false ) {
+                lz4wasmInstance = null;
+                return Promise.resolve(null);
+            }
+            if ( lz4wasmInstance instanceof WebAssembly.Instance ) {
+                return Promise.resolve(lz4wasmInstance);
+            }
+            if ( pendingInitialization === undefined ) {
+                pendingInitialization = WebAssembly.instantiateStreaming(
+                    fetch('lib/lz4-block-codec.wasm', { mode: 'same-origin'})
+                ).then(result => {
+                    pendingInitialization = undefined;
+                    lz4wasmInstance = result && result.instance || null;
+                });
+            }
+            return pendingInitialization;
+        };
+
+        let growMemoryTo = function(byteLength) {
+            let lz4api = lz4wasmInstance.exports;
+            let neededByteLength = lz4api.getLinearMemoryOffset() + byteLength;
+            let pageCountBefore = lz4api.memory.buffer.byteLength >>> 16;
+            let pageCountAfter = (neededByteLength + 65535) >>> 16;
+            if ( pageCountAfter > pageCountBefore ) {
+                lz4api.memory.grow(pageCountAfter - pageCountBefore);
+            }
+            return lz4api.memory;
+        };
+
+        let encodeValue = function(key, value) {
+            if ( value.length < 4096 ) { return value; }
+            let t0 = window.performance.now();
+            let lz4api = lz4wasmInstance.exports;
+            let mem0 = lz4api.getLinearMemoryOffset();
+            let memory = growMemoryTo(mem0 + 65536 * 4);
+            let hashTable = new Int32Array(memory.buffer, mem0, 65536);
+            hashTable.fill(-65536, 0, 65536);
+            let hashTableSize = hashTable.byteLength;
             if ( textEncoder === undefined ) {
                 textEncoder = new TextEncoder();
             }
-            let t0 = window.performance.now();
-            output[key] = new Blob([
-                SnappyJS.compress(textEncoder.encode(item))
-            ]);
-            let t1 = window.performance.now();
-            console.info(
-                'uBO: compressed %d bytes into %d bytes in %s ms',
-                item.length,
-                output[key].size,
-                (t1 - t0).toFixed(2)
+            let inputArray = textEncoder.encode(value);
+            let inputSize = inputArray.byteLength;
+            let memSize =
+                hashTableSize +
+                inputSize +
+                8 + lz4api.lz4BlockEncodeBound(inputSize);
+            memory = growMemoryTo(memSize);
+            let inputMem = new Uint8Array(
+                memory.buffer,
+                mem0 + hashTableSize,
+                inputSize
             );
-        }
-        return output;
-    }
+            inputMem.set(inputArray);
+            let outputSize = lz4api.lz4BlockEncode(
+                mem0 + hashTableSize,
+                inputSize,
+                mem0 + hashTableSize + inputSize + 8
+            );
+            if ( outputSize === 0 ) { return value; }
+            let outputMem = new Uint8Array(
+                memory.buffer,
+                mem0 + hashTableSize + inputSize,
+                8 + outputSize
+            );
+            outputMem[0] = 0x18;
+            outputMem[1] = 0x4D;
+            outputMem[2] = 0x22;
+            outputMem[3] = 0x04;
+            outputMem[4] = (inputSize >>>  0) & 0xFF;
+            outputMem[5] = (inputSize >>>  8) & 0xFF;
+            outputMem[6] = (inputSize >>> 16) & 0xFF;
+            outputMem[7] = (inputSize >>> 24) & 0xFF;
+            console.info(
+                'uBO: [%s] compressed %d bytes into %d bytes in %s ms',
+                key,
+                inputSize,
+                outputSize,
+                (window.performance.now() - t0).toFixed(2)
+            );
+            return new Blob([ outputMem ]);
+        };
 
-    function decompressInput(input, callback) {
-        let output = {};
-        let pendingItemCount = 0;
-        let countdown = function(key, ev) {
+        let resolveDecodedValue = function(resolve, ev, key, value) {
+            let inputBuffer = ev.target.result;
+            if ( inputBuffer instanceof ArrayBuffer === false ) {
+                return resolve({ key, value });
+            }
+            let t0 = window.performance.now();
+            let metadata = new Uint8Array(inputBuffer, 0, 8);
+            if (
+                metadata[0] !== 0x18 ||
+                metadata[1] !== 0x4D ||
+                metadata[2] !== 0x22 ||
+                metadata[3] !== 0x04
+            ) {
+                return resolve({ key, value });
+            }
+            let inputSize = inputBuffer.byteLength - 8;
+            let outputSize = 
+                (metadata[4] <<  0) |
+                (metadata[5] <<  8) |
+                (metadata[6] << 16) |
+                (metadata[7] << 24);
+            let lz4api = lz4wasmInstance.exports;
+            let mem0 = lz4api.getLinearMemoryOffset();
+            let memSize = inputSize + outputSize;
+            let memory = growMemoryTo(memSize);
+            let inputArea = new Uint8Array(
+                memory.buffer,
+                mem0,
+                inputSize
+            );
+            inputArea.set(new Uint8Array(inputBuffer, 8, inputSize));
+            outputSize = lz4api.lz4BlockDecode(inputSize);
+            if ( outputSize === 0 ) {
+                return resolve({ key, value });
+            }
+            let outputArea = new Uint8Array(
+                memory.buffer,
+                mem0 + inputSize,
+                outputSize
+            );
             if ( textDecoder === undefined ) {
                 textDecoder = new TextDecoder();
             }
-            let t0 = window.performance.now();
-            output[key] = textDecoder.decode(
-                SnappyJS.uncompress(ev.target.result)
-            );
-            let t1 = window.performance.now();
+            value = textDecoder.decode(outputArea);
             console.info(
-                'uBO: decompressed %d bytes into %d bytes in %s ms',
-                ev.target.result.byteLength,
-                output[key].length,
-                (t1 - t0).toFixed(2)
+                'uBO: [%s] decompressed %d bytes into %d bytes in %s ms',
+                key,
+                inputSize,
+                outputSize,
+                (window.performance.now() - t0).toFixed(2)
             );
-            pendingItemCount -= 1;
-            if ( pendingItemCount === 0 ) {
-                callback(output);
+            resolve({ key, value });
+        };
+
+        let decodeValue = function(key, value) {
+            return new Promise(resolve => {
+                let blobReader = new FileReader();
+                blobReader.onloadend = ev => {
+                    resolveDecodedValue(resolve, ev, key, value);
+                };
+                blobReader.readAsArrayBuffer(value);
+            });
+        };
+
+        let encodeKeystore = function(keystore) {
+            if ( lz4wasmInstance instanceof Object === false ) {
+                return Promise.resolve(keystore);
+            }
+            return new Promise(resolve => {
+                for ( let key in keystore ) {
+                    if ( keystore.hasOwnProperty(key) === false ) { continue; }
+                    let value = keystore[key];
+                    if ( typeof value !== 'string' ) { continue; }
+                    keystore[key] = encodeValue(key, value);
+                }
+                resolve(keystore);
+            });
+        };
+
+        let decodeKeystore = function(keystore) {
+            if ( lz4wasmInstance instanceof Object === false ) {
+                return Promise.resolve(keystore);
+            }
+            let promises = [];
+            let processResult = details => {
+                keystore[details.key] = details.value;
+            };
+            for ( let key in keystore ) {
+                if ( keystore.hasOwnProperty(key) === false ) { continue; }
+                let value = keystore[key];
+                if ( value instanceof Blob === false ) { continue; }
+                promises.push(
+                    decodeValue(key, value).then(processResult)
+                );
+            }
+            return Promise.all(promises);
+        };
+
+        return {
+            encode: function(keystore) {
+                return init().then(( ) => {
+                    return encodeKeystore(keystore);
+                });
+            },
+            decode: function(keystore) {
+                return init().then(( ) => {
+                    return decodeKeystore(keystore);
+                });
             }
         };
-        for ( let key in input ) {
-            let item = input[key];
-            if ( item instanceof Blob === false ) {
-                output[key] = item;
-                continue;
-            }
-            pendingItemCount += 1;
-            let blobReader = new FileReader();
-            blobReader.onload = countdown.bind(blobReader, key);
-            blobReader.readAsArrayBuffer(item);
-        }
-        if ( pendingItemCount === 0 ) {
-            callback(output);
-        }
-    }
+    })();
 
-    function getDb(callback) {
-        if ( pending === undefined ) {
-            return callback();
-        }
-        if ( pending.length !== 0 ) {
-            return pending.push(callback);
-        }
+    let getDb = function getDb() {
         if ( db instanceof IDBDatabase ) {
-            return callback(db);
+            return Promise.resolve(db);
         }
-        pending.push(callback);
-        if ( pending.length !== 1 ) { return; }
+        if ( db === null ) {
+            return Promise.resolve(null);
+        }
+        if ( pendingInitialization !== undefined ) {
+            return pendingInitialization;
+        }
         // https://github.com/gorhill/uBlock/issues/3156
         //   I have observed that no event was fired in Tor Browser 7.0.7 +
         //   medium security level after the request to open the database was
@@ -196,90 +321,101 @@ vAPI.cacheStorage = (function() {
         //   necessary when reading the `error` property because we are not
         //   allowed to read this propery outside of event handlers in newer
         //   implementation of IDBRequest (my understanding).
-        var req;
-        try {
-            req = indexedDB.open(STORAGE_NAME, 1);
-            if ( req.error ) {
-                console.log(req.error);
+        pendingInitialization = new Promise(resolve => {
+            let req;
+            try {
+                req = indexedDB.open(STORAGE_NAME, 1);
+                if ( req.error ) {
+                    console.log(req.error);
+                    req = undefined;
+                }
+            } catch(ex) {
+            }
+            if ( req === undefined ) {
+                pendingInitialization = undefined;
+                db = null;
+                resolve(null);
+                return;
+            }
+            req.onupgradeneeded = function(ev) {
                 req = undefined;
-            }
-        } catch(ex) {
-        }
-        if ( req === undefined ) {
-            processPendings();
-            pending = undefined;
-            return;
-        }
-        req.onupgradeneeded = function(ev) {
-            req = undefined;
-            db = ev.target.result;
-            db.onerror = db.onabort = genericErrorHandler;
-            var table = db.createObjectStore(STORAGE_NAME, { keyPath: 'key' });
-            table.createIndex('value', 'value', { unique: false });
-        };
-        req.onsuccess = function(ev) {
-            req = undefined;
-            db = ev.target.result;
-            db.onerror = db.onabort = genericErrorHandler;
-            processPendings();
-        };
-        req.onerror = req.onblocked = function() {
-            req = undefined;
-            console.log(this.error);
-            processPendings();
-            pending = undefined;
-        };
-    }
+                let db = ev.target.result;
+                db.onerror = db.onabort = genericErrorHandler;
+                let table = db.createObjectStore(STORAGE_NAME, { keyPath: 'key' });
+                table.createIndex('value', 'value', { unique: false });
+            };
+            req.onsuccess = function(ev) {
+                pendingInitialization = undefined;
+                req = undefined;
+                db = ev.target.result;
+                db.onerror = db.onabort = genericErrorHandler;
+                resolve(db);
+            };
+            req.onerror = req.onblocked = function() {
+                pendingInitialization = undefined;
+                req = undefined;
+                db = null;
+                console.log(this.error);
+                resolve(null);
+            };
+        });
+        return pendingInitialization;
+    };
 
-    function getFromDb(keys, store, callback) {
+    let getFromDb = function(keys, keystore, callback) {
         if ( typeof callback !== 'function' ) { return; }
-        if ( keys.length === 0 ) { return callback(store); }
-        var gotOne = function() {
+        if ( keys.length === 0 ) { return callback(keystore); }
+        let gotOne = function() {
             if ( typeof this.result === 'object' ) {
-                store[this.result.key] = this.result.value;
+                keystore[this.result.key] = this.result.value;
             }
         };
-        getDb(function(db) {
+        getDb().then(( ) => {
             if ( !db ) { return callback(); }
-            var transaction = db.transaction(STORAGE_NAME);
+            let transaction = db.transaction(STORAGE_NAME);
             transaction.oncomplete =
             transaction.onerror =
-            transaction.onabort = function() {
-                return decompressInput(store, callback);
+            transaction.onabort = ( ) => {
+                lz4.decode(keystore).then(( ) => {
+                    callback(keystore);
+                });
             };
-            var table = transaction.objectStore(STORAGE_NAME);
-            for ( var key of keys ) {
-                var req = table.get(key);
+            let table = transaction.objectStore(STORAGE_NAME);
+            for ( let key of keys ) {
+                let req = table.get(key);
                 req.onsuccess = gotOne;
                 req.onerror = noopfn;
                 req = undefined;
             }
         });
-    }
+    };
 
-    function getAllFromDb(callback) {
+    let getAllFromDb = function(callback) {
         if ( typeof callback !== 'function' ) {
             callback = noopfn;
         }
-        getDb(function(db) {
+        getDb().then(( ) => {
             if ( !db ) { return callback(); }
-            var output = {};
-            var transaction = db.transaction(STORAGE_NAME);
+            let keystore = {};
+            let transaction = db.transaction(STORAGE_NAME);
             transaction.oncomplete =
             transaction.onerror =
-            transaction.onabort = function() {
-                decompressInput(output, callback);
+            transaction.onabort = ( ) => {
+                lz4.decode(keystore).then(( ) => {
+                    callback(keystore);
+                });
             };
-            var table = transaction.objectStore(STORAGE_NAME),
+            callback();
+            let table = transaction.objectStore(STORAGE_NAME),
                 req = table.openCursor();
             req.onsuccess = function(ev) {
-                var cursor = ev.target.result;
+                let cursor = ev.target.result;
                 if ( !cursor ) { return; }
-                output[cursor.key] = cursor.value;
+                keystore[cursor.key] = cursor.value;
                 cursor.continue();
             };
         });
-    }
+    };
 
     // https://github.com/uBlockOrigin/uBlock-issues/issues/141
     //   Mind that IDBDatabase.transaction() and IDBObjectStore.put()
@@ -287,14 +423,13 @@ vAPI.cacheStorage = (function() {
     //   https://developer.mozilla.org/en-US/docs/Web/API/IDBDatabase/transaction
     //   https://developer.mozilla.org/en-US/docs/Web/API/IDBObjectStore/put
 
-    function putToDb(input, callback) {
+    let putToDb = function(keystore, callback) {
         if ( typeof callback !== 'function' ) {
             callback = noopfn;
         }
-        let keys = Object.keys(input);
+        let keys = Object.keys(keystore);
         if ( keys.length === 0 ) { return callback(); }
-        input = compressInput(input);
-        getDb(function(db) {
+        getDb().then(lz4.encode(keystore)).then(( ) => {
             if ( !db ) { return callback(); }
             let finish = ( ) => {
                 if ( callback === undefined ) { return; }
@@ -311,7 +446,7 @@ vAPI.cacheStorage = (function() {
                 for ( let key of keys ) {
                     let entry = {};
                     entry.key = key;
-                    entry.value = input[key];
+                    entry.value = keystore[key];
                     table.put(entry);
                     entry = undefined;
                 }
@@ -319,15 +454,15 @@ vAPI.cacheStorage = (function() {
                 finish();
             }
         });
-    }
+    };
 
-    function deleteFromDb(input, callback) {
+    let deleteFromDb = function(input, callback) {
         if ( typeof callback !== 'function' ) {
             callback = noopfn;
         }
         let keys = Array.isArray(input) ? input.slice() : [ input ];
         if ( keys.length === 0 ) { return callback(); }
-        getDb(function(db) {
+        getDb().then(db => {
             if ( !db ) { return callback(); }
             let finish = ( ) => {
                 if ( callback === undefined ) { return; }
@@ -348,13 +483,13 @@ vAPI.cacheStorage = (function() {
                 finish();
             }
         });
-    }
+    };
 
-    function clearDb(callback) {
+    let clearDb = function(callback) {
         if ( typeof callback !== 'function' ) {
             callback = noopfn;
         }
-        getDb(function(db) {
+        getDb().then(db => {
             if ( !db ) { return callback(); }
             let finish = ( ) => {
                 if ( callback === undefined ) { return; }
@@ -371,7 +506,12 @@ vAPI.cacheStorage = (function() {
                 finish();
             }
         });
-    }
+    };
+
+    // prime the db so that it's ready asap for next access.
+    getDb(noopfn);
+
+    return api;
 }());
 
 /******************************************************************************/
