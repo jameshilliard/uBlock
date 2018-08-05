@@ -43,9 +43,9 @@ vAPI.cacheStorage = (function() {
     // Firefox-specific: we use indexedDB because chrome.storage.local() has
     // poor performance in Firefox. See:
     // https://bugzilla.mozilla.org/show_bug.cgi?id=1371255
-    //if ( vAPI.webextFlavor.soup.has('firefox') === false ) {
-    //    return vAPI.cacheStorage;
-    //}
+    if ( vAPI.webextFlavor.soup.has('firefox') === false ) {
+        return vAPI.cacheStorage;
+    }
 
     const STORAGE_NAME = 'uBlock0CacheStorage';
     let db;
