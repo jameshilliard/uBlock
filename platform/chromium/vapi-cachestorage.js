@@ -193,7 +193,6 @@ vAPI.cacheStorage = (function() {
             transaction.oncomplete =
             transaction.onerror =
             transaction.onabort = ( ) => callback(keystore);
-            callback();
             let table = transaction.objectStore(STORAGE_NAME),
                 req = table.openCursor();
             req.onsuccess = function(ev) {
