@@ -19,7 +19,7 @@
     Home: https://github.com/gorhill/uBlock
 */
 
-/* global IDBDatabase, WebAssembly, indexedDB */
+/* global IDBDatabase, indexedDB */
 
 'use strict';
 
@@ -50,7 +50,6 @@ vAPI.cacheStorage = (function() {
     const STORAGE_NAME = 'uBlock0CacheStorage';
     let db;
     let pendingInitialization;
-    let textEncoder, textDecoder;
 
     let get = function get(input, callback) {
         if ( typeof callback !== 'function' ) { return; }
@@ -98,209 +97,6 @@ vAPI.cacheStorage = (function() {
 
     function noopfn() {
     }
-
-    let lz4 = (function() {
-        let lz4wasmInstance;
-        let pendingInitialization;
-
-        let init = function() {
-            if ( lz4wasmInstance === null ) {
-                return Promise.resolve(null);
-            }
-            if ( WebAssembly instanceof Object === false ) {
-                lz4wasmInstance = null;
-                return Promise.resolve(null);
-            }
-            if ( lz4wasmInstance instanceof WebAssembly.Instance ) {
-                return Promise.resolve(lz4wasmInstance);
-            }
-            if ( pendingInitialization === undefined ) {
-                pendingInitialization = WebAssembly.instantiateStreaming(
-                    fetch('lib/lz4-block-codec.wasm', { mode: 'same-origin'})
-                ).then(result => {
-                    pendingInitialization = undefined;
-                    lz4wasmInstance = result && result.instance || null;
-                });
-            }
-            return pendingInitialization;
-        };
-
-        let growMemoryTo = function(byteLength) {
-            let lz4api = lz4wasmInstance.exports;
-            let neededByteLength = lz4api.getLinearMemoryOffset() + byteLength;
-            let pageCountBefore = lz4api.memory.buffer.byteLength >>> 16;
-            let pageCountAfter = (neededByteLength + 65535) >>> 16;
-            if ( pageCountAfter > pageCountBefore ) {
-                lz4api.memory.grow(pageCountAfter - pageCountBefore);
-            }
-            return lz4api.memory;
-        };
-
-        let encodeValue = function(key, value) {
-            if ( value.length < 4096 ) { return value; }
-            let t0 = window.performance.now();
-            let lz4api = lz4wasmInstance.exports;
-            let mem0 = lz4api.getLinearMemoryOffset();
-            let memory = growMemoryTo(mem0 + 65536 * 4);
-            let hashTable = new Int32Array(memory.buffer, mem0, 65536);
-            hashTable.fill(-65536, 0, 65536);
-            let hashTableSize = hashTable.byteLength;
-            if ( textEncoder === undefined ) {
-                textEncoder = new TextEncoder();
-            }
-            let inputArray = textEncoder.encode(value);
-            let inputSize = inputArray.byteLength;
-            let memSize =
-                hashTableSize +
-                inputSize +
-                8 + lz4api.lz4BlockEncodeBound(inputSize);
-            memory = growMemoryTo(memSize);
-            let inputMem = new Uint8Array(
-                memory.buffer,
-                mem0 + hashTableSize,
-                inputSize
-            );
-            inputMem.set(inputArray);
-            let outputSize = lz4api.lz4BlockEncode(
-                mem0 + hashTableSize,
-                inputSize,
-                mem0 + hashTableSize + inputSize + 8
-            );
-            if ( outputSize === 0 ) { return value; }
-            let outputMem = new Uint8Array(
-                memory.buffer,
-                mem0 + hashTableSize + inputSize,
-                8 + outputSize
-            );
-            outputMem[0] = 0x18;
-            outputMem[1] = 0x4D;
-            outputMem[2] = 0x22;
-            outputMem[3] = 0x04;
-            outputMem[4] = (inputSize >>>  0) & 0xFF;
-            outputMem[5] = (inputSize >>>  8) & 0xFF;
-            outputMem[6] = (inputSize >>> 16) & 0xFF;
-            outputMem[7] = (inputSize >>> 24) & 0xFF;
-            console.info(
-                'uBO: [%s] compressed %d bytes into %d bytes in %s ms',
-                key,
-                inputSize,
-                outputSize,
-                (window.performance.now() - t0).toFixed(2)
-            );
-            return new Blob([ outputMem ]);
-        };
-
-        let resolveDecodedValue = function(resolve, ev, key, value) {
-            let inputBuffer = ev.target.result;
-            if ( inputBuffer instanceof ArrayBuffer === false ) {
-                return resolve({ key, value });
-            }
-            let t0 = window.performance.now();
-            let metadata = new Uint8Array(inputBuffer, 0, 8);
-            if (
-                metadata[0] !== 0x18 ||
-                metadata[1] !== 0x4D ||
-                metadata[2] !== 0x22 ||
-                metadata[3] !== 0x04
-            ) {
-                return resolve({ key, value });
-            }
-            let inputSize = inputBuffer.byteLength - 8;
-            let outputSize = 
-                (metadata[4] <<  0) |
-                (metadata[5] <<  8) |
-                (metadata[6] << 16) |
-                (metadata[7] << 24);
-            let lz4api = lz4wasmInstance.exports;
-            let mem0 = lz4api.getLinearMemoryOffset();
-            let memSize = inputSize + outputSize;
-            let memory = growMemoryTo(memSize);
-            let inputArea = new Uint8Array(
-                memory.buffer,
-                mem0,
-                inputSize
-            );
-            inputArea.set(new Uint8Array(inputBuffer, 8, inputSize));
-            outputSize = lz4api.lz4BlockDecode(inputSize);
-            if ( outputSize === 0 ) {
-                return resolve({ key, value });
-            }
-            let outputArea = new Uint8Array(
-                memory.buffer,
-                mem0 + inputSize,
-                outputSize
-            );
-            if ( textDecoder === undefined ) {
-                textDecoder = new TextDecoder();
-            }
-            value = textDecoder.decode(outputArea);
-            console.info(
-                'uBO: [%s] decompressed %d bytes into %d bytes in %s ms',
-                key,
-                inputSize,
-                outputSize,
-                (window.performance.now() - t0).toFixed(2)
-            );
-            resolve({ key, value });
-        };
-
-        let decodeValue = function(key, value) {
-            return new Promise(resolve => {
-                let blobReader = new FileReader();
-                blobReader.onloadend = ev => {
-                    resolveDecodedValue(resolve, ev, key, value);
-                };
-                blobReader.readAsArrayBuffer(value);
-            });
-        };
-
-        let encodeKeystore = function(keystore) {
-            if ( lz4wasmInstance instanceof Object === false ) {
-                return Promise.resolve(keystore);
-            }
-            return new Promise(resolve => {
-                for ( let key in keystore ) {
-                    if ( keystore.hasOwnProperty(key) === false ) { continue; }
-                    let value = keystore[key];
-                    if ( typeof value !== 'string' ) { continue; }
-                    keystore[key] = encodeValue(key, value);
-                }
-                resolve(keystore);
-            });
-        };
-
-        let decodeKeystore = function(keystore) {
-            if ( lz4wasmInstance instanceof Object === false ) {
-                return Promise.resolve(keystore);
-            }
-            let promises = [];
-            let processResult = details => {
-                keystore[details.key] = details.value;
-            };
-            for ( let key in keystore ) {
-                if ( keystore.hasOwnProperty(key) === false ) { continue; }
-                let value = keystore[key];
-                if ( value instanceof Blob === false ) { continue; }
-                promises.push(
-                    decodeValue(key, value).then(processResult)
-                );
-            }
-            return Promise.all(promises);
-        };
-
-        return {
-            encode: function(keystore) {
-                return init().then(( ) => {
-                    return encodeKeystore(keystore);
-                });
-            },
-            decode: function(keystore) {
-                return init().then(( ) => {
-                    return decodeKeystore(keystore);
-                });
-            }
-        };
-    })();
 
     let getDb = function getDb() {
         if ( db instanceof IDBDatabase ) {
@@ -375,11 +171,7 @@ vAPI.cacheStorage = (function() {
             let transaction = db.transaction(STORAGE_NAME);
             transaction.oncomplete =
             transaction.onerror =
-            transaction.onabort = ( ) => {
-                lz4.decode(keystore).then(( ) => {
-                    callback(keystore);
-                });
-            };
+            transaction.onabort = ( ) => callback(keystore);
             let table = transaction.objectStore(STORAGE_NAME);
             for ( let key of keys ) {
                 let req = table.get(key);
@@ -400,11 +192,7 @@ vAPI.cacheStorage = (function() {
             let transaction = db.transaction(STORAGE_NAME);
             transaction.oncomplete =
             transaction.onerror =
-            transaction.onabort = ( ) => {
-                lz4.decode(keystore).then(( ) => {
-                    callback(keystore);
-                });
-            };
+            transaction.onabort = ( ) => callback(keystore);
             callback();
             let table = transaction.objectStore(STORAGE_NAME),
                 req = table.openCursor();
@@ -429,7 +217,7 @@ vAPI.cacheStorage = (function() {
         }
         let keys = Object.keys(keystore);
         if ( keys.length === 0 ) { return callback(); }
-        getDb().then(lz4.encode(keystore)).then(( ) => {
+        getDb().then(( ) => {
             if ( !db ) { return callback(); }
             let finish = ( ) => {
                 if ( callback === undefined ) { return; }
