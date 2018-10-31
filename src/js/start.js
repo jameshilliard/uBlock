@@ -287,7 +287,12 @@ var onFirstFetchReady = function(fetched) {
     onVersionReady(fetched.version);
     onCommandShortcutsReady(fetched.commandShortcuts);
 
-    µb.loadPublicSuffixList(onPSLReady);
+    Promise.all([
+        µb.loadPublicSuffixList(),
+        µb.staticNetFilteringEngine.readyToUse()
+    ]).then(( ) => {
+        onPSLReady();
+    });
     µb.loadRedirectResources();
 };
 

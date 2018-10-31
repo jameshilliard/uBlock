@@ -1,7 +1,7 @@
 /*******************************************************************************
 
     uBlock Origin - a browser extension to block requests.
-    Copyright (C) 2017 Raymond Hill
+    Copyright (C) 2017-present Raymond Hill
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -18,6 +18,8 @@
 
     Home: https://github.com/gorhill/uBlock
 */
+
+/* exported hnTrieManager */
 
 'use strict';
 
@@ -37,440 +39,385 @@
   For example, `www.abc.com` is deemed matching `abc.com`, because the former
   is a subdomain of the latter. The opposite is of course not true.
 
-  The resulting read-only trie created as a result of using HNTrieBuilder are
+  The resulting read-only tries created as a result of using hnTrieManager are
   simply just typed arrays filled with integers. The matching algorithm is
   just a matter of reading/comparing these integers, and further using them as
   indices in the array as a way to move around in the trie.
-
-  There is still place for optimizations. Specifically, I could force the
-  strings to be properly sorted so that `HNTrie.matches` could bail earlier
-  when trying to find a matching descendant -- but suspect the gain would be
-  marginal, if measurable.
 
   [1] To solve <https://github.com/gorhill/uBlock/issues/3193>
 
 */
 
-var HNTrieBuilder = function() {
-    this.reset();
-};
+const hnTrieManager = {
+    tree: [],
+    treesz: 0,
+    trie: new Uint8Array(65536),
+    triesz: 256,    // bytes 0-254: decoded needle, byte 255: needle length
+    id: 0,
+    needle: '',
 
-/*******************************************************************************
-
-  A plain javascript array is used to build the trie. It will be casted into
-  the appropriate read-only TypedArray[1] at vacuum time.
-
-  [1] Depending on the size: Uint8Array, Uint16Array, or Uint32Array.
-
-*/
-
-HNTrieBuilder.prototype.reset = function() {
-    this.buf = [];
-    this.bufsz = 0;
-    this.buf[0] = 0;
-    this.buf[1] = 0;
-    this.buf[2] = 0;
-    return this;
-};
-
-/*******************************************************************************
-
-  Helpers for convenience.
-
-*/
-
-HNTrieBuilder.fromDomainOpt = function(domainOpt) {
-    var builder = new HNTrieBuilder();
-    builder.fromDomainOpt(domainOpt);
-    return builder.vacuum();
-};
-
-HNTrieBuilder.fromIterable = function(hostnames) {
-    var builder = new HNTrieBuilder();
-    builder.fromIterable(hostnames);
-    return builder.vacuum();
-};
-
-HNTrieBuilder.print = function(trie) {
-    var buf = trie.buf,
-        i = 0, cc = [], ic, indent = 0,
-        forks = [];
-    for (;;) {
-        if ( buf[i] !== 0 ) {
-            forks.push(i, indent);
+    reset: function() {
+        if ( this.trie.byteLength > 65536 ) {
+            this.trie = new Uint8Array(65536);
+        } else {
+            this.trie.fill(0);
         }
-        cc.unshift(buf[i+2]);
-        for ( ic = 0; ic < buf[i+3]; ic++ ) {
-            cc.unshift(buf[i+4+ic]);
+        this.triesz = 256;
+        this.needle = '';
+        this.id += 1;
+    },
+
+    readyToUse: function() {
+        return Promise.resolve();
+    },
+
+    isValidRef: function(ref) {
+        return ref !== null && ref.id === this.id;
+    },
+
+    setNeedle: function(needle) {
+        if ( needle !== this.needle ) {
+            const buf = this.trie; 
+            let i = needle.length;
+            buf[255] = i;
+            while ( i-- ) {
+                buf[i] = needle.charCodeAt(i);
+            }
+            this.needle = needle;
         }
-        console.log('\xB7'.repeat(indent) + String.fromCharCode.apply(null, cc));
-        indent += cc.length;
-        cc = [];
-        i = buf[i+1];
-        if ( i === 0 ) {
-            if ( forks.length === 0 ) { break; }
-            indent = forks.pop();
-            i = forks.pop();
-            i = buf[i];
-        }
-    }
-};
+        return this;
+    },
 
-/*******************************************************************************
-
-  Since this trie is specialized for matching hostnames, the stored strings are
-  reversed internally, because of hostname comparison logic:
-
-  Correct matching:
-    index      0123456
-               abc.com
-                     |
-           www.abc.com
-    index  01234567890
-
-  Incorrect matching (typically used for plain strings):
-    index  0123456
-           abc.com
-           |
-           www.abc.com
-    index  01234567890
-
-*/
-
-HNTrieBuilder.prototype.add = function(hn) {
-    var ichar = hn.length - 1;
-    if ( ichar === -1 ) { return; }
-    var c = hn.charCodeAt(ichar),
-        i = 0, inext;
-    for (;;) {
-        if ( this.buf[i+2] !== c ) {                // match not found
-            inext = this.buf[i];                    // move to descendant
-            if ( inext === 0 ) { break; }           // no descendant
-        } else {                                    // match found
-            if ( c === 0 ) { return; }
-            inext = this.buf[i+1];                  // move to sibling
+    matches: function(trieOffset) {
+        let buf = this.trie,
+            ichar = buf[255],
+            i = trieOffset;
+        for (;;) {
             ichar -= 1;
-            c = ichar === -1 ? 0 : hn.charCodeAt(ichar);
+            let c1 = ichar === -1 ? 0 : buf[ichar];
+            for (;;) {
+                let c2 = buf[i+6];                // quick test: first character
+                if ( c2 === c1 ) { break; }
+                if ( c2 === 0 && c1 === 0x2E ) { return true; }
+                i = (buf[i+0+0] <<  0) |
+                    (buf[i+0+1] <<  8) |
+                    (buf[i+0+2] << 16);
+                if ( i === 0 ) { return false; }  // no more descendants
+            }
+            if ( c1 === 0 ) { return true; }
+            let ccnt = buf[i+7];
+            if ( ccnt !== 0 ) {                   // cell is only one character
+                if ( ccnt > ichar ) { return false; }
+                let ic = ccnt;
+                let i1 = ichar-1;
+                let i2 = i+8;
+                while ( ic-- && buf[i1-ic] === buf[i2+ic] );
+                if ( ic !== -1 ) { return false; }
+                ichar -= ccnt;
+            }
+            i = (buf[i+3+0] <<  0) |
+                (buf[i+3+1] <<  8) |
+                (buf[i+3+2] << 16);
+            if ( i === 0 ) {
+                return ichar === 0 || buf[ichar-1] === 0x2E;
+            }
         }
-        i = inext;
-    }
-    // Any new string added will always cause a new descendant to be created.
-    // The only time this is not the case is when trying to store a string
-    // which is already in the trie.
-    inext = this.bufsz;                 // new descendant cell
-    this.buf[i] = inext;
-    this.buf[inext+0] = 0;              // jump index to descendant
-    this.buf[inext+1] = 0;              // jump index to sibling
-    this.buf[inext+2] = c;              // character code
-    this.bufsz += 3;
-    if ( c === 0 ) { return; }          // character zero is always last cell
-    do {
-        i = inext;                      // new branch sprouting made from
-        ichar -= 1;                     // all characters left to store
-        c = ichar === -1 ? 0 : hn.charCodeAt(ichar);
-        inext = this.bufsz;
-        this.buf[i+1] = inext;
-        this.buf[inext+0] = 0;
-        this.buf[inext+1] = 0;
-        this.buf[inext+2] = c;
-        this.bufsz += 3;
-    } while ( c!== 0 );
-};
+    },
 
-/*******************************************************************************
+    start: function() {
+        this.treesz = 0;
+        this.tree[0] = 0;
+        this.tree[1] = 0;
+        this.tree[2] = 0;
+    },
 
-  Not using String.split('|') to avoid memory churning.
+    /***************************************************************************
 
-*/
+      Since this trie is specialized for matching hostnames, the stored
+      strings are reversed internally, because of hostname comparison logic:
 
-HNTrieBuilder.prototype.fromDomainOpt = function(hostnames) {
-    return this.fromIterable(hostnames.split('|'));
-};
+      Correct matching:
+        index      0123456
+                   abc.com
+                         |
+               www.abc.com
+        index  01234567890
 
-HNTrieBuilder.prototype.fromIterable = function(hostnames) {
-    var hns = Array.from(hostnames).sort(function(a, b) {
-        return a.length - b.length;
-    });
-    // https://github.com/gorhill/uBlock/issues/3328
-    //   Must sort from shortest to longest.
-    for ( var hn of hns ) {
-        this.add(hn);
-    }
-    return this;
+      Incorrect matching (typically used for plain strings):
+        index  0123456
+               abc.com
+               |
+               www.abc.com
+        index  01234567890
+
+    */
+
+    add: function(hn) {
+        let ichar = hn.length - 1;
+        if ( ichar === -1 ) { return; }
+        let c = hn.charCodeAt(ichar),
+            i = 0, inext;
+        for (;;) {
+            if ( this.tree[i+2] !== c ) {       // match not found
+                inext = this.tree[i];           // move to descendant
+                if ( inext === 0 ) { break; }   // no descendant
+            } else {                            // match found
+                if ( c === 0 ) { return; }
+                inext = this.tree[i+1];         // move to sibling
+                ichar -= 1;
+                c = ichar === -1 ? 0 : hn.charCodeAt(ichar);
+            }
+            i = inext;
+        }
+        // Any new string added will always cause a new descendant to be
+        // created. The only time this is not the case is when trying to
+        // store a string which is already in the trie.
+        inext = this.treesz;            // new descendant cell
+        this.tree[i] = inext;
+        this.tree[inext+0] = 0;         // jump index to descendant
+        this.tree[inext+1] = 0;         // jump index to sibling
+        this.tree[inext+2] = c;         // character code
+        this.treesz += 3;
+        if ( c === 0 ) { return; }      // character zero is always last cell
+        do {
+            i = inext;                  // new branch sprouting made from
+            ichar -= 1;                 // all characters left to store
+            c = ichar === -1 ? 0 : hn.charCodeAt(ichar);
+            inext = this.treesz;
+            this.tree[i+1] = inext;
+            this.tree[inext+0] = 0;
+            this.tree[inext+1] = 0;
+            this.tree[inext+2] = c;
+            this.treesz += 3;
+        } while ( c!== 0 );
+    },
+
+    /***************************************************************************
+
+      Before vacuuming, each cell is 3 entry-long:
+      - Jump index to descendant (if any)
+      - Jump index to sibling (if any)
+      - character code
+
+      All strings stored in the un-vacuumed trie are zero-terminated, and the
+      character zero does occupy a cell like any other character. Let's
+      use _ to represent character zero for sake of comments. The asterisk
+      will be used to highlight a node with a descendant.
+
+      Cases, before vacuuming:
+
+        abc.com, abc.org: 16 cells
+                                             *
+          _ -- a -- b -- c -- . -- c -- o -- m
+          _ -- a -- b -- c -- . -- o -- r -- g
+
+        abc.com, xyz.com: 12 cells
+                         *
+          _ -- a -- b -- c -- . -- c -- o -- m
+          _ -- x -- y -- z
+
+        ab.com, b.com: 8 cells
+               *
+          _ -- a -- b -- . -- c -- o -- m
+               _
+
+        b.com, ab.com: 8 cells
+               *
+               _ -- b -- . -- c -- o -- m
+          _ -- a
+
+      Vacuuming is the process of merging sibling cells with no descendants.
+      Cells with descendants can't be merged.
+
+      Each time we arrive at the end of a horizontal branch (sibling jump
+      index is 0), we walk back to the nearest previous node with descendants,
+      and repeat the process. Since there is no index information on where to
+      come back, a stack is used to remember cells with descendants (descendant
+      jump index is non zero) encountered on the way
+
+      After vacuuming, each cell is 4+n entry-long:
+      - Jump index to descendant (if any)
+      - Jump index to sibling (if any)
+      - character code
+      - length of merged character code(s)
+
+      Cases, after vacuuming:
+
+        abc.com, abc.org: 2 cells
+                  *
+          [abc.co]m
+          [abc.or]g
+
+        abc.com, xyz.com: 3 cells
+              *
+          [ab]c -- [.co]m
+          [xy]z
+
+        ab.com, b.com: 3 cells
+          *
+          a -- [b.co]m
+          _
+
+        b.com, ab.com: 3 cells
+          *
+          _ -- [b.co]m
+          a
+
+      It's possible for a character zero cell to have descendants.
+
+      It's not possible for a character zero cell to have next siblings.
+
+      This will have to be taken into account during both vacuuming and
+      matching.
+
+      Character zero cells with no descendant are discarded during vacuuming.
+      Character zero cells with a descendant, or character zero cells which
+      are a decendant are kept into the vacuumed trie.
+
+      A vacuumed trie is very efficient memory- and lookup-wise, but is also
+      read-only: no string can be added or removed. The read-only trie is
+      really just a self-sufficient array of integers, and can easily be
+      exported/imported as a JSON array. It is theoretically possible to
+      "decompile" a trie (vacuumed or not) into the set of strings originally
+      added to it (in the order they were added with the current
+      implementation), but so far I do not need this feature.
+
+      New vacuum output array format:
+          byte 0..2: offset to descendant
+          byte 3..5: offset to sibling
+          byte 6: first character
+          byte 7: number of extra characters
+          Offset & count values are little-endian.
+
+          3 + 3 + 1 + 1 = 8 bytes for one character, otherwise
+          3 + 3 + 1 + 1 + n = 8 + n bytes for one + n character(s)
+    */
+
+    finish: function() {
+        if ( this.treesz === 0 ) { return null; }
+        let input = this.tree,
+            output = this.trie,
+            iout0 = this.triesz,
+            iout1 = iout0,
+            iout2 = output.byteLength,
+            forks = [],
+            iin = 0;
+        for (;;) {
+            if ( (iout1 + 264) >= iout2 ) {
+                output = this.growBuffer();
+                iout2 = output.byteLength;
+            }
+            let iout = iout1;
+            output[iout+0+0] = 0;
+            output[iout+0+1] = 0;
+            output[iout+0+2] = 0;
+            output[iout+3+0] = 0;
+            output[iout+3+1] = 0;
+            output[iout+3+2] = 0;
+            output[iout+6] = input[iin+2];              // first character
+            output[iout+7] = 0;                         // extra character count
+            iout1 += 8;
+            if ( input[iin] !== 0 ) {                   // cell with descendant
+                forks.push(iout, iin);                  // defer processing
+            }
+            for (;;) {                                  // merge sibling cell(s)
+                iin = input[iin+1];                     // sibling cell
+                if ( iin === 0 ) { break; }             // no more sibling cell
+                if ( input[iin] !== 0 ) { break; }      // cell with a descendant
+                if ( input[iin+2] === 0 ) { break; }    // don't merge \x00
+                output[iout1] = input[iin+2];           // add character data
+                iout1 += 1;
+            }
+            if ( iout1 !== iout + 8 ) {                 // cells were merged
+                output[iout+7] = iout1 - iout - 8;      // so adjust count
+            }
+            if ( iin !== 0 && input[iin] !== 0 ) {      // can't merge this cell
+                output[iout+3+0] = (iout1 >>>  0) & 0xFF;
+                output[iout+3+1] = (iout1 >>>  8) & 0xFF;
+                output[iout+3+2] = (iout1 >>> 16);
+                continue;
+            }
+            if ( forks.length === 0 ) { break; }        // no more descendants: bye
+            iin = forks.pop();                          // process next descendant
+            iout = forks.pop();
+            iin = input[iin];
+            output[iout+0+0] = (iout1 >>>  0) & 0xFF;
+            output[iout+0+1] = (iout1 >>>  8) & 0xFF;
+            output[iout+0+2] = (iout1 >>> 16);
+        }
+        this.triesz = iout1;
+        this.tree = [];
+        this.treesz = 0;
+        return new HNTrieRef(iout0);
+    },
+
+    fromIterable: function(hostnames) {
+        this.start();
+        let hns = Array.from(hostnames).sort(function(a, b) {
+            return a.length - b.length;
+        });
+        // https://github.com/gorhill/uBlock/issues/3328
+        //   Must sort from shortest to longest.
+        for ( let hn of hns ) {
+            this.add(hn);
+        }
+        return this.finish();
+    },
+
+    fromDomainOpt: function(hostnames) {
+        return this.fromIterable(hostnames.split('|'));
+    },
+
+    growBuffer: function() {
+        let trie = new Uint8Array(this.trie.byteLength + 65536);
+        trie.set(this.trie);
+        this.trie = trie;
+        return this.trie;
+    },
+
+    // For debugging purpose
+    // TODO: currently broken, needs to be fixed as per new buffer format.
+    /*
+    print: function(offset) {
+        let i = offset, cc = [], indent = 0,
+            forks = [];
+        for (;;) {
+            if ( buf[i] !== 0 ) {
+                forks.push(i, indent);
+            }
+            cc.unshift(buf[i+2]);
+            for ( let ic = 0; ic < buf[i+3]; ic++ ) {
+                cc.unshift(buf[i+4+ic]);
+            }
+            console.log('\xB7'.repeat(indent) + String.fromCharCode.apply(null, cc));
+            indent += cc.length;
+            cc = [];
+            i = buf[i+1];
+            if ( i === 0 ) {
+                if ( forks.length === 0 ) { break; }
+                indent = forks.pop();
+                i = forks.pop();
+                i = buf[i];
+            }
+        }
+    },
+    */
 };
 
 /******************************************************************************/
 
-HNTrieBuilder.prototype.matches = function(needle) {
-    var ichar = needle.length - 1,
-        buf = this.buf, i = 0, c;
-    for (;;) {
-        c = ichar === -1 ? 0 : needle.charCodeAt(ichar);
-        while ( buf[i+2] !== c ) {
-            i = buf[i];
-            if ( i === 0 ) { return false; }
-        }
-        if ( c === 0 ) { return true; }
-        i = buf[i+1];
-        if ( i === 0 ) { return c === 0x2E; }
-        ichar -= 1;
-    }
+const HNTrieRef = function(offset) {
+    this.id = hnTrieManager.id;
+    this.offset = offset;
 };
 
-/*******************************************************************************
-
-  Before vacuuming, each cell is 3 entry-long:
-  - Jump index to descendant (if any)
-  - Jump index to sibling (if any)
-  - character code
-
-  All strings stored in the un-vacuumed trie are zero-terminated, and the
-  character zero does occupy a cell like any other character. Let's use _ to
-  represent character zero for sake of comments. The asterisk will be used to
-  highlight a node with a descendant.
-
-  Cases, before vacuuming:
-
-    abc.com, abc.org: 16 cells
-                                         *
-      _ -- a -- b -- c -- . -- c -- o -- m
-      _ -- a -- b -- c -- . -- o -- r -- g
-
-    abc.com, xyz.com: 12 cells
-                     *
-      _ -- a -- b -- c -- . -- c -- o -- m
-      _ -- x -- y -- z
-
-    ab.com, b.com: 8 cells
-           *
-      _ -- a -- b -- . -- c -- o -- m
-           _
-
-    b.com, ab.com: 8 cells
-           *
-           _ -- b -- . -- c -- o -- m
-      _ -- a
-
-  Vacuuming is the process of merging sibling cells with no descendants. Cells
-  with descendants can't be merged.
-
-  Each time we arrive at the end of a horizontal branch (sibling jump index is
-  0), we walk back to the nearest previous node with descendants, and repeat
-  the process. Since there is no index information on where to come back, a
-  stack is used to remember cells with descendants (descendant jump index is
-  non zero) encountered on the way
-
-  After vacuuming, each cell is 4+n entry-long:
-  - Jump index to descendant (if any)
-  - Jump index to sibling (if any)
-  - character code
-  - length of merged character code(s)
-
-  Cases, after vacuuming:
-
-    abc.com, abc.org: 2 cells
-              *
-      [abc.co]m
-      [abc.or]g
-
-    abc.com, xyz.com: 3 cells
-          *
-      [ab]c -- [.co]m
-      [xy]z
-
-    ab.com, b.com: 3 cells
-      *
-      a -- [b.co]m
-      _
-
-    b.com, ab.com: 3 cells
-      *
-      _ -- [b.co]m
-      a
-
-  It's possible for a character zero cell to have descendants.
-
-  It's not possible for a character zero cell to have next siblings.
-
-  This will have to be taken into account during both vacuuming and matching.
-
-  Character zero cells with no descendant are discarded during vacuuming.
-  Character zero cells with a descendant, or character zero cells which are a
-  decendant are kept into the vacuumed trie.
-
-  A vacuumed trie is very efficient memory- and lookup-wise, but is also
-  read-only: no string can be added or removed. The read-only trie is really
-  just a self-sufficient array of integers, and can easily be exported/imported
-  as a JSON array. It is theoretically possible to "decompile" a trie (vacuumed
-  or not) into the set of strings originally added to it (in the order they
-  were added with the current implementation), but so far I do not need this
-  feature.
-
-  TODO: It's possible to build the vacuumed trie on the fly as items are
-  added to it. I need to carefully list all possible cases which can arise
-  at insertion time. The benefits will be: faster creation time (expected), no
-  longer read-only trie (items can be added at any time).
-
-*/
-
-HNTrieBuilder.prototype.vacuum = function() {
-    if ( this.bufsz === 0 ) { return null; }
-    var input = this.buf,
-        output = [], outsz = 0,
-        forks = [],
-        iin = 0, iout;
-    for (;;) {
-        iout = outsz;
-        output[iout+0] = 0;
-        output[iout+1] = 0;
-        output[iout+2] = input[iin+2];              // first character
-        output[iout+3] = 0;
-        outsz += 4;
-        if ( input[iin] !== 0 ) {                   // cell with descendant
-            forks.push(iout, iin);                  // defer processing
-        }
-        for (;;) {                                  // merge sibling cell(s)
-            iin = input[iin+1];                     // sibling cell
-            if ( iin === 0 ) { break; }             // no more sibling cell
-            if ( input[iin] !== 0 ) { break; }      // cell with a descendant
-            if ( input[iin+2] === 0 ) { break; }    // don't merge \x00
-            output[outsz] = input[iin+2];           // add character data
-            outsz += 1;
-        }
-        if ( outsz !== iout + 4 ) {                 // cells were merged
-            output[iout+3] = outsz - iout - 4;      // so adjust count
-        }
-        if ( iin !== 0 && input[iin] !== 0 ) {      // can't merge this cell
-            output[iout+1] = outsz;
-            continue;
-        }
-        if ( forks.length === 0 ) { break; }        // no more descendants: bye
-        iin = forks.pop();                          // process next descendant
-        iout = forks.pop();
-        iin = input[iin];
-        output[iout] = outsz;
-    }
-    var trie;                                       // pick optimal read-only
-    if ( outsz < 256 ) {                            // container array.
-        trie = new this.HNTrie8(output, outsz);
-    } else if ( outsz < 65536 ) {
-        trie = new this.HNTrie16(output, outsz);
-    } else {
-        trie = new this.HNTrie32(output, outsz);
-    }
-    this.reset();                                   // free working array
-    return trie;
-};
-
-/*******************************************************************************
-
-  The following internal classes are the actual output of the vacuum() method.
-
-  They use the minimal amount of data to be able to efficiently lookup strings
-  in a read-only trie.
-
-  Given that javascript optimizers mind that the type of an argument passed to
-  a function always stays the same each time the function is called, there need
-  to be three separate implementation of matches() to allow the javascript
-  optimizer to do its job.
-
-  The matching code deals only with looking up values in a TypedArray (beside
-  calls to String.charCodeAt), so I expect this to be fast and good candidate
-  for optimization by javascript engines.
-
-*/
-
-HNTrieBuilder.prototype.HNTrie8 = function(buf, bufsz) {
-    this.buf = new Uint8Array(buf.slice(0, bufsz));
-};
-
-HNTrieBuilder.prototype.HNTrie8.prototype.matches = function(needle) {
-    var ichar = needle.length,
-        i = 0, c1, c2, ccnt, ic, i1, i2;
-    for (;;) {
-        ichar -= 1;
-        c1 = ichar === -1 ? 0 : needle.charCodeAt(ichar);
-        while ( (c2 = this.buf[i+2]) !== c1 ) {     // quick test: first character
-            if ( c2 === 0 && c1 === 0x2E ) { return true; }
-            i = this.buf[i];                        // next descendant
-            if ( i === 0 ) { return false; }        // no more descendants
-        }
-        if ( c1 === 0 ) { return true; }
-        ccnt = this.buf[i+3];
-        if ( ccnt !== 0 ) {                         // cell is only one character
-            if ( ccnt > ichar ) { return false; }
-            ic = ccnt; i1 = ichar-1; i2 = i+4;
-            while ( ic-- && needle.charCodeAt(i1-ic) === this.buf[i2+ic] );
-            if ( ic !== -1 ) { return false; }
-            ichar -= ccnt;
-        }
-        i = this.buf[i+1];                          // next sibling
-        if ( i === 0 ) {
-            return ichar === 0 || needle.charCodeAt(ichar-1) === 0x2E;
-        }
-    }
-};
-
-HNTrieBuilder.prototype.HNTrie16 = function(buf, bufsz) {
-    this.buf = new Uint16Array(buf.slice(0, bufsz));
-};
-
-HNTrieBuilder.prototype.HNTrie16.prototype.matches = function(needle) {
-    var ichar = needle.length,
-        i = 0, c1, c2, ccnt, ic, i1, i2;
-    for (;;) {
-        ichar -= 1;
-        c1 = ichar === -1 ? 0 : needle.charCodeAt(ichar);
-        while ( (c2 = this.buf[i+2]) !== c1 ) {     // quick test: first character
-            if ( c2 === 0 && c1 === 0x2E ) { return true; }
-            i = this.buf[i];                        // next descendant
-            if ( i === 0 ) { return false; }        // no more descendants
-        }
-        if ( c1 === 0 ) { return true; }
-        ccnt = this.buf[i+3];
-        if ( ccnt !== 0 ) {                         // cell is only one character
-            if ( ccnt > ichar ) { return false; }
-            ic = ccnt; i1 = ichar-1; i2 = i+4;
-            while ( ic-- && needle.charCodeAt(i1-ic) === this.buf[i2+ic] );
-            if ( ic !== -1 ) { return false; }
-            ichar -= ccnt;
-        }
-        i = this.buf[i+1];                          // next sibling
-        if ( i === 0 ) {
-            return ichar === 0 || needle.charCodeAt(ichar-1) === 0x2E;
-        }
-    }
-};
-
-HNTrieBuilder.prototype.HNTrie32 = function(buf, bufsz) {
-    this.buf = new Uint32Array(buf.slice(0, bufsz));
-};
-
-HNTrieBuilder.prototype.HNTrie32.prototype.matches = function(needle) {
-    var ichar = needle.length,
-        i = 0, c1, c2, ccnt, ic, i1, i2;
-    for (;;) {
-        ichar -= 1;
-        c1 = ichar === -1 ? 0 : needle.charCodeAt(ichar);
-        while ( (c2 = this.buf[i+2]) !== c1 ) {     // quick test: first character
-            if ( c2 === 0 && c1 === 0x2E ) { return true; }
-            i = this.buf[i];                        // next descendant
-            if ( i === 0 ) { return false; }        // no more descendants
-        }
-        if ( c1 === 0 ) { return true; }
-        ccnt = this.buf[i+3];
-        if ( ccnt !== 0 ) {                         // cell is only one character
-            if ( ccnt > ichar ) { return false; }
-            ic = ccnt; i1 = ichar-1; i2 = i+4;
-            while ( ic-- && needle.charCodeAt(i1-ic) === this.buf[i2+ic] );
-            if ( ic !== -1 ) { return false; }
-            ichar -= ccnt;
-        }
-        i = this.buf[i+1];                          // next sibling
-        if ( i === 0 ) {
-            return ichar === 0 || needle.charCodeAt(ichar-1) === 0x2E;
-        }
-    }
+HNTrieRef.prototype = {
+    isValid: function() {
+        return this.id === hnTrieManager.id;
+    },
+    matches: function(needle) {
+        return hnTrieManager.setNeedle(needle).matches(this.offset);
+    },
 };
 
 /*******************************************************************************
