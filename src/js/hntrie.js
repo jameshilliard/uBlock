@@ -53,6 +53,7 @@ const hnTrieManager = {
     tree: [],
     treesz: 0,
     trie: new Uint8Array(65536),
+    trie32: null,
     triesz: 256,    // bytes 0-254: decoded needle, byte 255: needle length
     id: 0,
     needle: '',
@@ -62,6 +63,7 @@ const hnTrieManager = {
     reset: function() {
         if ( this.wasmMemory === null && this.trie.byteLength > 65536 ) {
             this.trie = new Uint8Array(65536);
+            this.trie32 = new Uint32Array(this.trie.buffer);
         } else {
             this.trie.fill(0);
         }
@@ -95,30 +97,31 @@ const hnTrieManager = {
 
     matchesJS: function(itrie) {
         const buf = this.trie;
+        const buf32 = this.trie32;
         let ineedle = buf[255];
         for (;;) {
             ineedle -= 1;
-            let nchar = ineedle === -1 ? 0 : buf[ineedle];
+            const nchar = ineedle === -1 ? 0 : buf[ineedle];
             for (;;) {
-                let tchar = buf[itrie+6];           // quick test: first character
+                const tchar = buf[itrie+8];         // quick test: first character
                 if ( tchar === nchar ) { break; }
                 if ( tchar === 0 && nchar === 0x2E ) { return 1; }
-                itrie = buf[itrie+0+0] | (buf[itrie+0+1] << 8) | (buf[itrie+0+2] << 16);
+                itrie = buf32[itrie >>> 2];
                 if ( itrie === 0 ) { return 0; }    // no more descendants
             }
             if ( nchar === 0 ) { return 1; }
-            let nxtra = buf[itrie+7];
-            if ( nxtra !== 0 ) {                    // cell is only one character
-                if ( nxtra > ineedle ) { return 0; }
-                let ixtra = itrie + 8;
+            let lxtra = buf[itrie+9];               // length of extra charaters
+            if ( lxtra !== 0 ) {                    // cell is only one character
+                if ( lxtra > ineedle ) { return 0; }
+                let ixtra = itrie + 10;
+                lxtra += ixtra;
                 do {
                     ineedle -= 1;
                     if ( buf[ineedle] !== buf[ixtra] ) { return 0; }
                     ixtra += 1;
-                    nxtra -= 1;
-                } while ( nxtra !== 0 );
+                } while ( ixtra !== lxtra );
             }
-            itrie = buf[itrie+3+0] | (buf[itrie+3+1] << 8) | (buf[itrie+3+2] << 16);
+            itrie = buf32[itrie + 4 >>> 2];
             if ( itrie === 0 ) {
                 return ineedle === 0 || buf[ineedle-1] === 0x2E ? 1 : 0;
             }
@@ -128,6 +131,9 @@ const hnTrieManager = {
     matches: null,
 
     start: function() {
+        if ( this.trie32 === null ) {
+            this.trie32 = new Uint32Array(this.trie.buffer);
+        }
         this.treesz = 0;
         this.tree[0] = 0;
         this.tree[1] = 0;
@@ -298,28 +304,27 @@ const hnTrieManager = {
 
     finish: function() {
         if ( this.treesz === 0 ) { return null; }
-        const input = this.tree;
+        const input = this.tree,
+              iout0 = this.triesz,
+              forks = [];
         let output = this.trie,
-            iout0 = this.triesz,
+            output32 = this.trie32,
             iout1 = iout0,
             iout2 = output.byteLength,
-            forks = [],
             iin = 0;
         for (;;) {
-            if ( (iout1 + 264) >= iout2 ) {
-                output = this.growBuffer();
+            if ( (iout1 + 266) >= iout2 ) {
+                this.growBuffer();
+                output = this.trie;
+                output32 = this.trie32;
                 iout2 = output.byteLength;
             }
             let iout = iout1;
-            output[iout+0+0] = 0;
-            output[iout+0+1] = 0;
-            output[iout+0+2] = 0;
-            output[iout+3+0] = 0;
-            output[iout+3+1] = 0;
-            output[iout+3+2] = 0;
-            output[iout+6] = input[iin+2];              // first character
-            output[iout+7] = 0;                         // extra character count
-            iout1 += 8;
+            output32[iout >>> 2] = 0;
+            output32[iout + 4 >>> 2] = 0;
+            output[iout+8] = input[iin+2];              // first character
+            output[iout+9] = 0;                         // extra character count
+            iout1 += 10;
             if ( input[iin] !== 0 ) {                   // cell with descendant
                 forks.push(iout, iin);                  // defer processing
             }
@@ -331,22 +336,19 @@ const hnTrieManager = {
                 output[iout1] = input[iin+2];           // add character data
                 iout1 += 1;
             }
-            if ( iout1 !== iout + 8 ) {                 // cells were merged
-                output[iout+7] = iout1 - iout - 8;      // so adjust count
+            if ( iout1 !== iout + 10 ) {                // cells were merged
+                output[iout+9] = iout1 - iout - 10;     // so adjust count
             }
+            iout1 = (iout1 + 3) & ~3;                   // align to i32
             if ( iin !== 0 && input[iin] !== 0 ) {      // can't merge this cell
-                output[iout+3+0] = (iout1 >>>  0) & 0xFF;
-                output[iout+3+1] = (iout1 >>>  8) & 0xFF;
-                output[iout+3+2] = (iout1 >>> 16);
+                output32[iout + 4 >>> 2] = iout1;
                 continue;
             }
             if ( forks.length === 0 ) { break; }        // no more descendants: bye
             iin = forks.pop();                          // process next descendant
             iout = forks.pop();
             iin = input[iin];
-            output[iout+0+0] = (iout1 >>>  0) & 0xFF;
-            output[iout+0+1] = (iout1 >>>  8) & 0xFF;
-            output[iout+0+2] = (iout1 >>> 16);
+            output32[iout >>> 2] = iout1;
         }
         this.triesz = iout1;
         this.tree = [];
@@ -373,15 +375,15 @@ const hnTrieManager = {
 
     growBuffer: function() {
         let trie;
-        if ( this.wasmMmemory === null ) {
+        if ( this.wasmMemory === null ) {
             trie = new Uint8Array(this.trie.byteLength + 65536);
             trie.set(this.trie);
         } else {
-            this.wasmMmemory.grow(1);
-            trie = new Uint8Array(this.wasmMmemory.buffer);
+            this.wasmMemory.grow(1);
+            trie = new Uint8Array(this.wasmMemory.buffer);
         }
         this.trie = trie;
-        return this.trie;
+        this.trie32 = new Uint32Array(this.trie.buffer);
     },
 
     // For debugging purpose
@@ -437,8 +439,8 @@ const hnTrieManager = {
 
     let workingDir;
     {
-        let url = document.currentScript.src;
-        let match = /[^\/]+$/.exec(url);
+        const url = document.currentScript.src;
+        const match = /[^\/]+$/.exec(url);
         workingDir = match !== null
             ? url.slice(0, match.index)
             : '';
@@ -452,13 +454,17 @@ const hnTrieManager = {
     ).then(result => {
         hnTrieManager.wasmLoading = null;
         if ( !result || !result.instance ) { return; }
-        let pageCount = hnTrieManager.trie.byteLength >>> 16;
+        const pageCount = hnTrieManager.trie.byteLength >>> 16;
         if ( pageCount > 1 ) {
             memory.grow(pageCount - 1);
         }
-        let trie = new Uint8Array(memory.buffer);
+        const trie = new Uint8Array(memory.buffer);
         trie.set(hnTrieManager.trie);
         hnTrieManager.trie = trie;
+        if ( hnTrieManager.trie32 !== null ) {
+            hnTrieManager.trie32 = new Uint32Array(memory.buffer);
+        }
+        hnTrieManager.wasmMemory = memory;
         hnTrieManager.matchesWASM = result.instance.exports.matches;
         hnTrieManager.matches = hnTrieManager.matchesWASM;
     }).catch(reason => {

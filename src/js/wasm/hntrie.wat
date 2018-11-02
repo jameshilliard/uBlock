@@ -18,7 +18,7 @@
 ;; Home: https://github.com/gorhill/uBlock
 ;; File: hntrie.wat
 ;; Description: WebAssembly code used by src/js/hntrie.js
-;;
+;; How to compile: See README.md in this directory.
 
 (module
 ;;
@@ -47,9 +47,9 @@
     (param $itrie i32)
     (result i32)                        ;; result: 0 = miss, 1 = hit
     (local $ineedle i32)                ;; current needle offset
-    (local $nchar i32)                  ;; needle char bing processed
-    (local $tchar i32)                  ;; trie char bing processed
-    (local $nxtra i32)
+    (local $nchar i32)                  ;; needle char being processed
+    (local $tchar i32)                  ;; trie char being processed
+    (local $lxtra i32)
     (local $ixtra i32)
     i32.const 255
     i32.load8_u
@@ -72,9 +72,9 @@
             set_local $nchar
         end
         block $trieCharEqNeedleChar loop $nextTrieChar
-            ;; let tchar = buf[itrie+6];
+            ;; let tchar = buf[itrie+8];
             get_local $itrie
-            i32.load8_u offset=6
+            i32.load8_u offset=8
             tee_local $tchar
             ;; if ( tchar === nchar ) { break; }
             get_local $nchar
@@ -92,19 +92,9 @@
                     return
                 end
             end
-            ;; itrie = buf[itrie+0+0] | (buf[itrie+0+1] << 8) | (buf[itrie+0+2] << 16);
+            ;; itrie = buf32[itrie >>> 2];
             get_local $itrie
-            i32.load8_u
-            get_local $itrie
-            i32.load8_u offset=1
-            i32.const 8
-            i32.shl
-            i32.or
-            get_local $itrie
-            i32.load8_u offset=2
-            i32.const 16
-            i32.shl
-            i32.or
+            i32.load
             tee_local $itrie
             ;; if ( itrie === 0 ) { return 0; }
             i32.eqz
@@ -121,25 +111,29 @@
             i32.const 1
             return
         end
-        ;; let nxtra = buf[itrie+7];
+        ;; let lxtra = buf[itrie+9];
         get_local $itrie
-        i32.load8_u offset=7
-        tee_local $nxtra
+        i32.load8_u offset=9
+        tee_local $lxtra
         i32.eqz
         if else
-            ;; if ( nxtra > ineedle ) { return 0; }
-            get_local $nxtra
+            ;; if ( lxtra > ineedle ) { return 0; }
+            get_local $lxtra
             get_local $ineedle
             i32.gt_u
             if
                 i32.const 0
                 return
             end
-            ;; let ixtra = itrie + 8;
+            ;; let ixtra = itrie + 10;
             get_local $itrie
-            i32.const 8
+            i32.const 10
             i32.add
-            set_local $ixtra
+            tee_local $ixtra
+            ;; lxtra += ixtra;
+            get_local $lxtra
+            i32.add
+            set_local $lxtra
             ;; do {
             block $noMoreExtraChars loop
                 ;; ineedle -= 1;
@@ -160,31 +154,17 @@
                 get_local $ixtra
                 i32.const 1
                 i32.add
-                set_local $ixtra
-                ;; nxtra -= 1;
-                get_local $nxtra
-                i32.const -1
-                i32.add
-                tee_local $nxtra
-                ;; while ( nxtra !== 0 ) {
-                i32.eqz
+                tee_local $ixtra
+                ;; while ( ixtra !== lxtra ) {
+                get_local $lxtra
+                i32.eq
                 br_if $noMoreExtraChars
                 br 0
             end end
         end
-        ;; itrie = buf[itrie+3+0] | (buf[itrie+3+1] << 8) | (buf[itrie+3+2] << 16);
+        ;; itrie = buf32[itrie + 4 >>> 2];
         get_local $itrie
-        i32.load8_u offset=3
-        get_local $itrie
-        i32.load8_u offset=4
-        i32.const 8
-        i32.shl
-        i32.or
-        get_local $itrie
-        i32.load8_u offset=5
-        i32.const 16
-        i32.shl
-        i32.or
+        i32.load offset=4
         tee_local $itrie
         ;; if ( itrie === 0 ) {
         i32.eqz
