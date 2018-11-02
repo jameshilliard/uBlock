@@ -30,7 +30,7 @@
 
 /******************************************************************************/
 
-var µb = µBlock;
+const µb = µBlock;
 
 // fedcba9876543210
 //       |    | |||
@@ -43,15 +43,15 @@ var µb = µBlock;
 //       |    +-------- bit 4- 8: type [0 - 31]
 //       +------------- bit 9-15: unused
 
-var BlockAction = 0 << 0;
-var AllowAction = 1 << 0;
-var Important   = 1 << 1;
-var AnyParty    = 0 << 2;
-var FirstParty  = 1 << 2;
-var ThirdParty  = 2 << 2;
+const BlockAction = 0 << 0;
+const AllowAction = 1 << 0;
+const Important   = 1 << 1;
+const AnyParty    = 0 << 2;
+const FirstParty  = 1 << 2;
+const ThirdParty  = 2 << 2;
 
-var AnyType = 0 << 4;
-var typeNameToTypeValue = {
+const AnyType = 0 << 4;
+const typeNameToTypeValue = {
            'no_type':  0 << 4,
         'stylesheet':  1 << 4,
              'image':  2 << 4,
@@ -75,9 +75,9 @@ var typeNameToTypeValue = {
             'webrtc': 19 << 4,
        'unsupported': 20 << 4
 };
-var otherTypeBitValue = typeNameToTypeValue.other;
+const otherTypeBitValue = typeNameToTypeValue.other;
 
-var typeValueToTypeName = {
+const typeValueToTypeName = {
      1: 'stylesheet',
      2: 'image',
      3: 'object',
@@ -100,16 +100,16 @@ var typeValueToTypeName = {
     20: 'unsupported'
 };
 
-var BlockAnyTypeAnyParty = BlockAction | AnyType | AnyParty;
-var BlockAnyType = BlockAction | AnyType;
-var BlockAnyParty = BlockAction | AnyParty;
+const BlockAnyTypeAnyParty = BlockAction | AnyType | AnyParty;
+const BlockAnyType = BlockAction | AnyType;
+const BlockAnyParty = BlockAction | AnyParty;
 
-var AllowAnyTypeAnyParty = AllowAction | AnyType | AnyParty;
-var AllowAnyType = AllowAction | AnyType;
-var AllowAnyParty = AllowAction | AnyParty;
+const AllowAnyTypeAnyParty = AllowAction | AnyType | AnyParty;
+const AllowAnyType = AllowAction | AnyType;
+const AllowAnyParty = AllowAction | AnyParty;
 
-var genericHideException = AllowAction | AnyParty | typeNameToTypeValue.generichide,
-    genericHideImportant = BlockAction | AnyParty | typeNameToTypeValue.generichide | Important;
+const genericHideException = AllowAction | AnyParty | typeNameToTypeValue.generichide,
+      genericHideImportant = BlockAction | AnyParty | typeNameToTypeValue.generichide | Important;
 
 // ABP filters: https://adblockplus.org/en/filters
 // regex tester: http://regex101.com/
@@ -119,7 +119,7 @@ var genericHideException = AllowAction | AnyParty | typeNameToTypeValue.generich
 // See the following as short-lived registers, used during evaluation. They are
 // valid until the next evaluation.
 
-var pageHostnameRegister = '',
+let pageHostnameRegister = '',
     requestHostnameRegister = '';
 //var filterRegister = null;
 //var categoryRegister = '';
@@ -127,13 +127,13 @@ var pageHostnameRegister = '',
 // Local helpers
 
 // Be sure to not confuse 'example.com' with 'anotherexample.com'
-var isFirstParty = function(domain, hostname) {
+const isFirstParty = function(domain, hostname) {
     return hostname.endsWith(domain) &&
           (hostname.length === domain.length ||
            hostname.charCodeAt(hostname.length - domain.length - 1) === 0x2E /* '.' */);
 };
 
-var normalizeRegexSource = function(s) {
+const normalizeRegexSource = function(s) {
     try {
         var re = new RegExp(s);
         return re.source;
@@ -143,12 +143,12 @@ var normalizeRegexSource = function(s) {
     return '';
 };
 
-var rawToRegexStr = function(s, anchor) {
-    var me = rawToRegexStr;
+const rawToRegexStr = function(s, anchor) {
+    let me = rawToRegexStr;
     // https://www.loggly.com/blog/five-invaluable-techniques-to-improve-regex-performance/
     // https://developer.mozilla.org/en/docs/Web/JavaScript/Guide/Regular_Expressions
     // Also: remove leading/trailing wildcards -- there is no point.
-    var reStr = s.replace(me.escape1, '\\$&')
+    let reStr = s.replace(me.escape1, '\\$&')
                  .replace(me.escape2, '(?:[^%.0-9a-z_-]|$)')
                  .replace(me.escape3, '')
                  .replace(me.escape4, '[^ ]*?');
@@ -175,7 +175,7 @@ rawToRegexStr.reTextHostnameAnchor2 = '^[a-z-]+://(?:[^/?#]+)?';
 
 const filterDataSerialize = µb.CompiledLineIO.serialize;
 
-var toLogDataInternal = function(categoryBits, tokenHash, filter) {
+const toLogDataInternal = function(categoryBits, tokenHash, filter) {
     if ( filter === null ) { return undefined; }
     let logData = filter.logData();
     logData.compiled = filterDataSerialize([
@@ -209,7 +209,7 @@ var toLogDataInternal = function(categoryBits, tokenHash, filter) {
 };
 
 // First character of match must be within the hostname part of the url.
-var isHnAnchored = function(url, matchStart) {
+const isHnAnchored = function(url, matchStart) {
     var hnStart = url.indexOf('://');
     if ( hnStart === -1 ) { return false; }
     hnStart += 3;
@@ -222,9 +222,9 @@ var isHnAnchored = function(url, matchStart) {
     return url.charCodeAt(matchStart - 1) === 0x2E;
 };
 
-var reURLPostHostnameAnchors = /[\/?#]/;
+const reURLPostHostnameAnchors = /[\/?#]/;
 
-var arrayStrictEquals = function(a, b) {
+const arrayStrictEquals = function(a, b) {
     var n = a.length;
     if ( n !== b.length ) { return false; }
     var isArray, x, y;
@@ -251,22 +251,22 @@ var arrayStrictEquals = function(a, b) {
 
 **/
 
-var filterClasses = [],
-    filterClassIdGenerator = 0;
+const filterClasses = [];
+let   filterClassIdGenerator = 0;
 
-var registerFilterClass = function(ctor) {
-    var fid = filterClassIdGenerator++;
+const registerFilterClass = function(ctor) {
+    let fid = filterClassIdGenerator++;
     ctor.fid = ctor.prototype.fid = fid;
     filterClasses[fid] = ctor;
 };
 
-var filterFromCompiledData = function(args) {
+const filterFromCompiledData = function(args) {
     return filterClasses[args[0]].load(args);
 };
 
 /******************************************************************************/
 
-var FilterTrue = function() {
+const FilterTrue = function() {
 };
 
 FilterTrue.prototype.match = function() {
@@ -297,7 +297,7 @@ registerFilterClass(FilterTrue);
 
 /******************************************************************************/
 
-var FilterPlain = function(s, tokenBeg) {
+const FilterPlain = function(s, tokenBeg) {
     this.s = s;
     this.tokenBeg = tokenBeg;
 };
@@ -330,7 +330,7 @@ registerFilterClass(FilterPlain);
 
 /******************************************************************************/
 
-var FilterPlainPrefix0 = function(s) {
+const FilterPlainPrefix0 = function(s) {
     this.s = s;
 };
 
@@ -362,7 +362,7 @@ registerFilterClass(FilterPlainPrefix0);
 
 /******************************************************************************/
 
-var FilterPlainPrefix1 = function(s) {
+const FilterPlainPrefix1 = function(s) {
     this.s = s;
 };
 
@@ -394,7 +394,7 @@ registerFilterClass(FilterPlainPrefix1);
 
 /******************************************************************************/
 
-var FilterPlainHostname = function(s) {
+const FilterPlainHostname = function(s) {
     this.s = s;
 };
 
@@ -429,7 +429,7 @@ registerFilterClass(FilterPlainHostname);
 
 /******************************************************************************/
 
-var FilterPlainLeftAnchored = function(s) {
+const FilterPlainLeftAnchored = function(s) {
     this.s = s;
 };
 
@@ -461,7 +461,7 @@ registerFilterClass(FilterPlainLeftAnchored);
 
 /******************************************************************************/
 
-var FilterPlainRightAnchored = function(s) {
+const FilterPlainRightAnchored = function(s) {
     this.s = s;
 };
 
@@ -493,7 +493,7 @@ registerFilterClass(FilterPlainRightAnchored);
 
 /******************************************************************************/
 
-var FilterExactMatch = function(s) {
+const FilterExactMatch = function(s) {
     this.s = s;
 };
 
@@ -525,7 +525,7 @@ registerFilterClass(FilterExactMatch);
 
 /******************************************************************************/
 
-var FilterPlainHnAnchored = function(s) {
+const FilterPlainHnAnchored = function(s) {
     this.s = s;
 };
 
@@ -558,7 +558,7 @@ registerFilterClass(FilterPlainHnAnchored);
 
 /******************************************************************************/
 
-var FilterGeneric = function(s, anchor) {
+const FilterGeneric = function(s, anchor) {
     this.s = s;
     this.anchor = anchor;
 };
@@ -603,7 +603,7 @@ registerFilterClass(FilterGeneric);
 
 /******************************************************************************/
 
-var FilterGenericHnAnchored = function(s) {
+const FilterGenericHnAnchored = function(s) {
     this.s = s;
 };
 
@@ -642,7 +642,7 @@ registerFilterClass(FilterGenericHnAnchored);
 
 /******************************************************************************/
 
-var FilterGenericHnAndRightAnchored = function(s) {
+const FilterGenericHnAndRightAnchored = function(s) {
     FilterGenericHnAnchored.call(this, s);
 };
 
@@ -682,7 +682,7 @@ registerFilterClass(FilterGenericHnAndRightAnchored);
 
 /******************************************************************************/
 
-var FilterRegex = function(s) {
+const FilterRegex = function(s) {
     this.re = s;
 };
 
@@ -723,7 +723,7 @@ registerFilterClass(FilterRegex);
 
 // Filtering according to the origin.
 
-var FilterOrigin = function() {
+const FilterOrigin = function() {
 };
 
 FilterOrigin.prototype.wrapped = {
@@ -766,7 +766,7 @@ FilterOrigin.prototype.compile = function() {
 
 // *** start of specialized origin matchers
 
-var FilterOriginHit = function(domainOpt) {
+const FilterOriginHit = function(domainOpt) {
     FilterOrigin.call(this);
     this.hostname = domainOpt;
 };
@@ -792,7 +792,7 @@ FilterOriginHit.prototype = Object.create(FilterOrigin.prototype, {
 
 //
 
-var FilterOriginMiss = function(domainOpt) {
+const FilterOriginMiss = function(domainOpt) {
     FilterOrigin.call(this);
     this.hostname = domainOpt.slice(1);
 };
@@ -819,7 +819,7 @@ FilterOriginMiss.prototype = Object.create(FilterOrigin.prototype, {
 
 //
 
-var FilterOriginHitSet = function(domainOpt) {
+const FilterOriginHitSet = function(domainOpt) {
     FilterOrigin.call(this);
     this.domainOpt = domainOpt.length < 128
         ? domainOpt
@@ -844,14 +844,14 @@ FilterOriginHitSet.prototype = Object.create(FilterOrigin.prototype, {
             if ( hnTrieManager.isValidRef(this.oneOf) === false ) {
                 this.oneOf = hnTrieManager.fromDomainOpt(this.domainOpt);
             }
-            return this.oneOf.matches(pageHostnameRegister);
+            return this.oneOf.matches(pageHostnameRegister) === 1;
         }
     },
 });
 
 //
 
-var FilterOriginMissSet = function(domainOpt) {
+const FilterOriginMissSet = function(domainOpt) {
     FilterOrigin.call(this);
     this.domainOpt = domainOpt.length < 128
         ? domainOpt
@@ -878,14 +878,14 @@ FilterOriginMissSet.prototype = Object.create(FilterOrigin.prototype, {
                     this.domainOpt.replace(/~/g, '')
                 );
             }
-            return this.noneOf.matches(pageHostnameRegister) === false;
+            return this.noneOf.matches(pageHostnameRegister) === 0;
         }
     },
 });
 
 //
 
-var FilterOriginMixedSet = function(domainOpt) {
+const FilterOriginMixedSet = function(domainOpt) {
     FilterOrigin.call(this);
     this.domainOpt = domainOpt.length < 128
         ? domainOpt
@@ -929,8 +929,8 @@ FilterOriginMixedSet.prototype = Object.create(FilterOrigin.prototype, {
                 this.init();
             }
             let needle = pageHostnameRegister;
-            return this.oneOf.matches(needle) &&
-                   this.noneOf.matches(needle) === false;
+            return this.oneOf.matches(needle) === 1 &&
+                   this.noneOf.matches(needle) === 0;
         }
     },
 });
@@ -982,7 +982,7 @@ registerFilterClass(FilterOrigin);
 
 /******************************************************************************/
 
-var FilterDataHolder = function(dataType, dataStr) {
+const FilterDataHolder = function(dataType, dataStr) {
     this.dataType = dataType;
     this.dataStr = dataStr;
     this.wrapped = undefined;
@@ -1025,7 +1025,7 @@ registerFilterClass(FilterDataHolder);
 
 // Helper class for storing instances of FilterDataHolder.
 
-var FilterDataHolderEntry = function(categoryBits, tokenHash, fdata) {
+const FilterDataHolderEntry = function(categoryBits, tokenHash, fdata) {
     this.categoryBits = categoryBits;
     this.tokenHash = tokenHash;
     this.filter = filterFromCompiledData(fdata);
@@ -1048,7 +1048,7 @@ FilterDataHolderEntry.load = function(data) {
 
 // Dictionary of hostnames
 //
-var FilterHostnameDict = function() {
+const FilterHostnameDict = function() {
     this.h = ''; // short-lived register
     this.dict = new Set();
 };
@@ -1139,7 +1139,7 @@ registerFilterClass(FilterHostnameDict);
 
 /******************************************************************************/
 
-var FilterPair = function(a, b) {
+const FilterPair = function(a, b) {
     this.f1 = a;
     this.f2 = b;
     this.f = null;
@@ -1218,7 +1218,7 @@ registerFilterClass(FilterPair);
 
 /******************************************************************************/
 
-var FilterBucket = function(a, b, c) {
+const FilterBucket = function(a, b, c) {
     this.filters = [];
     this.f = null;
     if ( a !== undefined ) {
@@ -1316,7 +1316,7 @@ registerFilterClass(FilterBucket);
 /******************************************************************************/
 /******************************************************************************/
 
-var FilterParser = function() {
+const FilterParser = function() {
     this.cantWebsocket = vAPI.cantWebsocket;
     this.reBadDomainOptChars = /[*+?^${}()[\]\\]/;
     this.reHostnameRule1 = /^[0-9a-z][0-9a-z.-]*[0-9a-z]$/i;
@@ -1934,7 +1934,7 @@ FilterParser.prototype.makeToken = function() {
 /******************************************************************************/
 /******************************************************************************/
 
-var FilterContainer = function() {
+const FilterContainer = function() {
     this.reIsGeneric = /[\^\*]/;
     this.filterParser = new FilterParser();
     this.urlTokenizer = µb.urlTokenizer;

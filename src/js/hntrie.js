@@ -19,6 +19,7 @@
     Home: https://github.com/gorhill/uBlock
 */
 
+/* globals WebAssembly */
 /* exported hnTrieManager */
 
 'use strict';
@@ -55,9 +56,11 @@ const hnTrieManager = {
     triesz: 256,    // bytes 0-254: decoded needle, byte 255: needle length
     id: 0,
     needle: '',
+    wasmLoading: null,
+    wasmMemory: null,
 
     reset: function() {
-        if ( this.trie.byteLength > 65536 ) {
+        if ( this.wasmMemory === null && this.trie.byteLength > 65536 ) {
             this.trie = new Uint8Array(65536);
         } else {
             this.trie.fill(0);
@@ -68,7 +71,9 @@ const hnTrieManager = {
     },
 
     readyToUse: function() {
-        return Promise.resolve();
+        return this.wasmLoading instanceof Promise
+            ? this.wasmLoading
+            : Promise.resolve();
     },
 
     isValidRef: function(ref) {
@@ -77,7 +82,7 @@ const hnTrieManager = {
 
     setNeedle: function(needle) {
         if ( needle !== this.needle ) {
-            const buf = this.trie; 
+            const buf = this.trie;
             let i = needle.length;
             buf[255] = i;
             while ( i-- ) {
@@ -88,41 +93,39 @@ const hnTrieManager = {
         return this;
     },
 
-    matches: function(trieOffset) {
-        let buf = this.trie,
-            ichar = buf[255],
-            i = trieOffset;
+    matchesJS: function(itrie) {
+        const buf = this.trie;
+        let ineedle = buf[255];
         for (;;) {
-            ichar -= 1;
-            let c1 = ichar === -1 ? 0 : buf[ichar];
+            ineedle -= 1;
+            let nchar = ineedle === -1 ? 0 : buf[ineedle];
             for (;;) {
-                let c2 = buf[i+6];                // quick test: first character
-                if ( c2 === c1 ) { break; }
-                if ( c2 === 0 && c1 === 0x2E ) { return true; }
-                i = (buf[i+0+0] <<  0) |
-                    (buf[i+0+1] <<  8) |
-                    (buf[i+0+2] << 16);
-                if ( i === 0 ) { return false; }  // no more descendants
+                let tchar = buf[itrie+6];           // quick test: first character
+                if ( tchar === nchar ) { break; }
+                if ( tchar === 0 && nchar === 0x2E ) { return 1; }
+                itrie = buf[itrie+0+0] | (buf[itrie+0+1] << 8) | (buf[itrie+0+2] << 16);
+                if ( itrie === 0 ) { return 0; }    // no more descendants
             }
-            if ( c1 === 0 ) { return true; }
-            let ccnt = buf[i+7];
-            if ( ccnt !== 0 ) {                   // cell is only one character
-                if ( ccnt > ichar ) { return false; }
-                let ic = ccnt;
-                let i1 = ichar-1;
-                let i2 = i+8;
-                while ( ic-- && buf[i1-ic] === buf[i2+ic] );
-                if ( ic !== -1 ) { return false; }
-                ichar -= ccnt;
+            if ( nchar === 0 ) { return 1; }
+            let nxtra = buf[itrie+7];
+            if ( nxtra !== 0 ) {                    // cell is only one character
+                if ( nxtra > ineedle ) { return 0; }
+                let ixtra = itrie + 8;
+                do {
+                    ineedle -= 1;
+                    if ( buf[ineedle] !== buf[ixtra] ) { return 0; }
+                    ixtra += 1;
+                    nxtra -= 1;
+                } while ( nxtra !== 0 );
             }
-            i = (buf[i+3+0] <<  0) |
-                (buf[i+3+1] <<  8) |
-                (buf[i+3+2] << 16);
-            if ( i === 0 ) {
-                return ichar === 0 || buf[ichar-1] === 0x2E;
+            itrie = buf[itrie+3+0] | (buf[itrie+3+1] << 8) | (buf[itrie+3+2] << 16);
+            if ( itrie === 0 ) {
+                return ineedle === 0 || buf[ineedle-1] === 0x2E ? 1 : 0;
             }
         }
     },
+    matchesWASM: null,
+    matches: null,
 
     start: function() {
         this.treesz = 0;
@@ -295,8 +298,8 @@ const hnTrieManager = {
 
     finish: function() {
         if ( this.treesz === 0 ) { return null; }
-        let input = this.tree,
-            output = this.trie,
+        const input = this.tree;
+        let output = this.trie,
             iout0 = this.triesz,
             iout1 = iout0,
             iout2 = output.byteLength,
@@ -353,7 +356,7 @@ const hnTrieManager = {
 
     fromIterable: function(hostnames) {
         this.start();
-        let hns = Array.from(hostnames).sort(function(a, b) {
+        const hns = Array.from(hostnames).sort(function(a, b) {
             return a.length - b.length;
         });
         // https://github.com/gorhill/uBlock/issues/3328
@@ -369,8 +372,14 @@ const hnTrieManager = {
     },
 
     growBuffer: function() {
-        let trie = new Uint8Array(this.trie.byteLength + 65536);
-        trie.set(this.trie);
+        let trie;
+        if ( this.wasmMmemory === null ) {
+            trie = new Uint8Array(this.trie.byteLength + 65536);
+            trie.set(this.trie);
+        } else {
+            this.wasmMmemory.grow(1);
+            trie = new Uint8Array(this.wasmMmemory.buffer);
+        }
         this.trie = trie;
         return this.trie;
     },
@@ -406,6 +415,60 @@ const hnTrieManager = {
 
 /******************************************************************************/
 
+(function() {
+    // Default to javascript version.
+    hnTrieManager.matches = hnTrieManager.matchesJS;
+
+    if (
+        typeof WebAssembly !== 'object' ||
+        typeof WebAssembly.instantiateStreaming !== 'function'
+    ) {
+        return;
+    }
+
+    // Soft-dependency on vAPI so that the code here can be used outside of
+    // uBO (i.e. tests, benchmarks)
+    if (
+        typeof vAPI === 'object' &&
+        vAPI.webextFlavor.soup.has('firefox') === false
+    ) {
+        return;
+    }
+
+    let workingDir;
+    {
+        let url = document.currentScript.src;
+        let match = /[^\/]+$/.exec(url);
+        workingDir = match !== null
+            ? url.slice(0, match.index)
+            : '';
+    }
+
+    const memory = new WebAssembly.Memory({ initial: 1 });
+
+    hnTrieManager.wasmLoading = WebAssembly.instantiateStreaming(
+        fetch(workingDir + 'wasm/hntrie.wasm', { mode: 'same-origin' }),
+        { imports: { memory } }
+    ).then(result => {
+        hnTrieManager.wasmLoading = null;
+        if ( !result || !result.instance ) { return; }
+        let pageCount = hnTrieManager.trie.byteLength >>> 16;
+        if ( pageCount > 1 ) {
+            memory.grow(pageCount - 1);
+        }
+        let trie = new Uint8Array(memory.buffer);
+        trie.set(hnTrieManager.trie);
+        hnTrieManager.trie = trie;
+        hnTrieManager.matchesWASM = result.instance.exports.matches;
+        hnTrieManager.matches = hnTrieManager.matchesWASM;
+    }).catch(reason => {
+        hnTrieManager.wasmLoading = null;
+        console.error(reason);
+    });
+})();
+
+/******************************************************************************/
+
 const HNTrieRef = function(offset) {
     this.id = hnTrieManager.id;
     this.offset = offset;
@@ -418,127 +481,68 @@ HNTrieRef.prototype = {
     matches: function(needle) {
         return hnTrieManager.setNeedle(needle).matches(this.offset);
     },
+    matchesJS: function(needle) {
+        return hnTrieManager.setNeedle(needle).matchesJS(this.offset);
+    },
+    matchesWASM: function(needle) {
+        return hnTrieManager.setNeedle(needle).matchesWASM(this.offset);
+    },
 };
 
-/*******************************************************************************
+/*
+Benchmarking, the higher ops/sec the better.
+Firefox 65.0 on Linux i686.
 
-  Experimenting: WebAssembly version.
-  Developed using this simple online tool: https://wasdk.github.io/WasmFiddle/
+Test 1000 needles against small-size dictionary
+  -           Set-based x 981 ops/sec ±10.57% (46 runs sampled)
+  -         Regex-based x 5,631 ops/sec ±3.26% (54 runs sampled)
+  -    Trie-based (old) x 5,898 ops/sec ±11.80% (43 runs sampled)
+  -       Trie-based JS x 1,548 ops/sec ±10.45% (45 runs sampled)
+  -     Trie-based WASM x 3,061 ops/sec ±0.80% (59 runs sampled)
+Done.
 
-  >>> start of C code
-    unsigned short buffer[0];
-    int matches(int id, int cclen)
-    {
-        unsigned short* cc0 = &buffer[0];
-        unsigned short* cc = cc0 + cclen;
-        unsigned short* cell0 = &buffer[512+id];
-        unsigned short* cell = cell0;
-        unsigned short* ww;
-        int c1, c2, ccnt;
-        for (;;) {
-            c1 = cc <= cc0 ? 0 : *--cc;
-            for (;;) {
-                c2 = cell[2];
-                if ( c2 == c1 ) { break; }
-                if ( c2 == 0 && c1 == 0x2E ) { return 1; }
-                if ( cell[0] == 0 ) { return 0; }
-                cell = cell0 + cell[0];
-            }
-            if ( c1 == 0 ) { return 1; }
-            ccnt = cell[3];
-            if ( ccnt != 0 ) {
-                if ( cc - ccnt < cc0 ) { return 0; }
-                ww = cell + 4;
-                while ( ccnt-- ) {
-                    if ( *--cc != *ww++ ) { return 0; }
-                }
-            }
-            if ( cell[1] == 0 ) {
-                if ( cc == cc0 ) { return 1; }
-                if ( *--cc == 0x2E ) { return 1; }
-                return 0;
-            }
-            cell = cell0 + cell[1];
-        }
-    }
-    int getLinearMemoryOffset() {
-      return (int)&buffer[0];
-    }
-  <<< end of C code
+Test 1000 needles against medium-size dictionary
+  -           Set-based x 1,120 ops/sec ±7.30% (52 runs sampled)
+  -         Regex-based x 3,512 ops/sec ±0.93% (60 runs sampled)
+  -    Trie-based (old) x 3,191 ops/sec ±0.82% (59 runs sampled)
+  -       Trie-based JS x 1,713 ops/sec ±4.09% (58 runs sampled)
+  -     Trie-based WASM x 2,296 ops/sec ±0.88% (59 runs sampled)
+Done.
 
-  Observations:
-  - When growing memory, we must re-create the typed array js-side. The content
-    of the array is preserved by grow().
-  - It's slower than the javascript version... Possible explanations:
-    - Call overhead: https://github.com/WebAssembly/design/issues/1120
-    - Having to copy whole input string in buffer before call.
+Test 1000 needles against large-size dictionary
+  -           Set-based x 1,023 ops/sec ±17.37% (46 runs sampled)
+  -         Regex-based x 792 ops/sec ±0.90% (58 runs sampled)
+  -    Trie-based (old) x 1,758 ops/sec ±0.85% (59 runs sampled)
+  -       Trie-based JS x 1,067 ops/sec ±0.87% (59 runs sampled)
+  -     Trie-based WASM x 1,658 ops/sec ±0.75% (60 runs sampled)
+Done.
 
-var HNTrie16wasm = (function() {
-    var module;
-    var instance;
-    var memory;
-    var memoryOrigin = 0;
-    var memoryUsed = 1024;
-    var cbuffer;
-    var tbuffer;
-    var tbufferSize = 0;
-    var matchesFn;
 
-    var init = function() {
-        module = new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,139,128,128,128,0,2,96,2,127,127,1,127,96,0,1,127,3,131,128,128,128,0,2,0,1,4,132,128,128,128,0,1,112,0,0,5,131,128,128,128,0,1,0,1,6,129,128,128,128,0,0,7,172,128,128,128,0,3,6,109,101,109,111,114,121,2,0,7,109,97,116,99,104,101,115,0,0,21,103,101,116,76,105,110,101,97,114,77,101,109,111,114,121,79,102,102,115,101,116,0,1,10,217,130,128,128,0,2,202,130,128,128,0,1,5,127,32,1,65,1,116,65,12,106,33,3,32,0,65,1,116,65,140,8,106,34,2,33,0,2,64,2,64,2,64,2,64,2,64,2,64,3,64,65,0,33,5,2,64,32,3,65,12,77,13,0,32,3,65,126,106,34,3,47,1,0,33,5,11,2,64,32,5,32,0,47,1,4,34,1,70,13,0,2,64,32,5,65,46,71,13,0,3,64,32,1,65,255,255,3,113,69,13,5,32,0,47,1,0,34,1,69,13,6,32,2,32,1,65,1,116,106,34,0,47,1,4,34,1,65,46,71,13,0,12,2,11,11,3,64,32,0,47,1,0,34,1,69,13,3,32,5,32,2,32,1,65,1,116,106,34,0,47,1,4,71,13,0,11,11,65,1,33,6,32,5,69,13,5,2,64,2,64,32,0,47,1,6,34,1,69,13,0,32,3,32,1,65,1,116,107,65,12,73,13,8,32,1,65,127,115,33,5,32,0,65,8,106,33,1,3,64,32,5,65,1,106,34,5,69,13,1,32,1,47,1,0,33,4,32,1,65,2,106,33,1,32,4,32,3,65,126,106,34,3,47,1,0,70,13,0,12,2,11,11,32,0,47,1,2,34,1,69,13,5,32,2,32,1,65,1,116,106,33,0,12,1,11,11,65,0,15,11,65,0,15,11,65,1,15,11,65,0,15,11,32,3,65,12,70,13,0,32,3,65,126,106,47,1,0,65,46,70,33,6,11,32,6,15,11,65,0,11,132,128,128,128,0,0,65,12,11]));
-        instance = new WebAssembly.Instance(module);
-        memory = instance.exports.memory;
-        memoryOrigin = instance.exports.getLinearMemoryOffset();
-        cbuffer = new Uint16Array(memory.buffer, memoryOrigin, 512);
-        tbuffer = new Uint16Array(memory.buffer, memoryOrigin + 1024);
-        memoryUsed = memoryOrigin + 1024;
-        matchesFn = instance.exports.matches;
-    };
 
-    return {
-        create: function(data) {
-            if ( module === undefined ) { init(); }
-            var bytesNeeded = memoryUsed + ((data.length * 2 + 3) & ~3);
-            if ( bytesNeeded > memory.buffer.byteLength ) {
-                memory.grow((bytesNeeded - memory.buffer.byteLength + 65535) >>> 16);
-                cbuffer = new Uint16Array(memory.buffer, memoryOrigin, 512);
-                tbuffer = new Uint16Array(memory.buffer, memoryOrigin + 1024);
-            }
-            for ( var i = 0, j = tbufferSize; i < data.length; i++, j++ ) {
-                tbuffer[j] = data[i];
-            }
-            var id = tbufferSize;
-            tbufferSize += data.length;
-            if ( tbufferSize & 1 ) { tbufferSize += 1; }
-            memoryUsed += tbufferSize * 2;
-            return id;
-        },
-        reset: function() {
-            module = undefined;
-            instance = undefined;
-            memory = undefined;
-            memory.grow(1);
-            memoryUsed = 1024;
-            cbuffer = undefined;
-            tbuffer = undefined;
-            tbufferSize = 0;
-        },
-        matches: function(id, hn) {
-            var len = hn.length;
-            if ( len > 512 ) {
-                hn = hn.slice(-512);
-                var pos = hn.indexOf('.');
-                if ( pos !== 0 ) {
-                    hn = hn.slice(pos + 1);
-                }
-                len = hn.length;
-            }
-            var needle = cbuffer, i = len;
-            while ( i-- ) {
-                needle[i] = hn.charCodeAt(i);
-            }
-            return matchesFn(id, len) === 1;
-        }
-    };
-})();
+Benchmarking, the higher ops/sec the better.
+Chrome 70.0.3538.77 on Ubuntu Chromium.
+
+Test 1000 needles against small-size dictionary
+  -           Set-based x 1,386 ops/sec ±18.56% (46 runs sampled)
+  -         Regex-based x 6,407 ops/sec ±1.73% (34 runs sampled)
+  -    Trie-based (old) x 7,833 ops/sec ±4.56% (56 runs sampled)
+  -       Trie-based JS x 2,825 ops/sec ±1.16% (58 runs sampled)
+  -     Trie-based WASM x 2,845 ops/sec ±0.90% (59 runs sampled)
+Done.
+
+Test 1000 needles against medium-size dictionary
+  -           Set-based x 1,790 ops/sec ±3.72% (57 runs sampled)
+  -         Regex-based x 4,259 ops/sec ±0.90% (57 runs sampled)
+  -    Trie-based (old) x 3,730 ops/sec ±0.68% (59 runs sampled)
+  -       Trie-based JS x 1,965 ops/sec ±0.81% (59 runs sampled)
+  -     Trie-based WASM x 2,068 ops/sec ±0.85% (57 runs sampled)
+Done.
+
+Test 1000 needles against large-size dictionary
+  -           Set-based x 1,508 ops/sec ±7.00% (53 runs sampled)
+  -         Regex-based x 3,042 ops/sec ±5.13% (54 runs sampled)
+  -    Trie-based (old) x 2,135 ops/sec ±3.24% (15 runs sampled)
+  -       Trie-based JS x 1,344 ops/sec ±4.78% (58 runs sampled)
+  -     Trie-based WASM x 1,470 ops/sec ±1.59% (56 runs sampled)
+Done.
 */
