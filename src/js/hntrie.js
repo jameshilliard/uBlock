@@ -50,7 +50,7 @@
 */
 
 const hnTrieManager = {
-    tree: [],
+    tree: null,
     treesz: 0,
     trie: new Uint8Array(65536),
     trie32: null,
@@ -59,6 +59,8 @@ const hnTrieManager = {
     needle: '',
     wasmLoading: null,
     wasmMemory: null,
+    cleanupToken: 0,
+    cleanupTimer: undefined,
 
     reset: function() {
         if ( this.wasmMemory === null && this.trie.byteLength > 65536 ) {
@@ -135,6 +137,9 @@ const hnTrieManager = {
             this.trie32 = new Uint32Array(this.trie.buffer);
         }
         this.treesz = 0;
+        if ( this.tree === null ) {
+            this.tree = new Uint32Array(16384);
+        }
         this.tree[0] = 0;
         this.tree[1] = 0;
         this.tree[2] = 0;
@@ -162,6 +167,10 @@ const hnTrieManager = {
     */
 
     add: function(hn) {
+        // 256 * 3 + 3 = 771
+        if ( this.treesz + 771 >= this.tree.length ) {
+            this.growTree();
+        }
         let ichar = hn.length - 1;
         if ( ichar === -1 ) { return; }
         let c = hn.charCodeAt(ichar),
@@ -199,6 +208,12 @@ const hnTrieManager = {
             this.tree[inext+2] = c;
             this.treesz += 3;
         } while ( c!== 0 );
+    },
+
+    growTree: function() {
+        let tree = new Uint32Array(this.tree.length + 16384);
+        tree.set(this.tree);
+        this.tree = tree;
     },
 
     /***************************************************************************
@@ -314,7 +329,7 @@ const hnTrieManager = {
             iin = 0;
         for (;;) {
             if ( (iout1 + 266) >= iout2 ) {
-                this.growBuffer();
+                this.growTrie();
                 output = this.trie;
                 output32 = this.trie32;
                 iout2 = output.byteLength;
@@ -351,8 +366,7 @@ const hnTrieManager = {
             output32[iout >>> 2] = iout1;
         }
         this.triesz = iout1;
-        this.tree = [];
-        this.treesz = 0;
+        this.cleanupAsync();
         return new HNTrieRef(iout0);
     },
 
@@ -373,7 +387,7 @@ const hnTrieManager = {
         return this.fromIterable(hostnames.split('|'));
     },
 
-    growBuffer: function() {
+    growTrie: function() {
         let trie;
         if ( this.wasmMemory === null ) {
             trie = new Uint8Array(this.trie.byteLength + 65536);
@@ -384,6 +398,20 @@ const hnTrieManager = {
         }
         this.trie = trie;
         this.trie32 = new Uint32Array(this.trie.buffer);
+    },
+
+    cleanupAsync: function() {
+        if ( this.cleanupTimer === undefined ) {
+            this.cleanupToken = this.triesz;
+            this.cleanupTimer = setTimeout(( ) => {
+                this.cleanupTimer = undefined;
+                if ( this.cleanupToken !== this.triesz ) {
+                    this.cleanupAsync();
+                } else {
+                    this.tree = null;
+                }
+            }, 30000);
+        }
     },
 
     // For debugging purpose
@@ -436,6 +464,13 @@ const hnTrieManager = {
     ) {
         return;
     }
+
+    // The wasm module will work only if CPU is natively little-endian,
+    // as we use native uint32 array in our trie-creation js code.
+    const uint32s = new Uint32Array(1);
+    const uint8s = new Uint8Array(uint32s.buffer);
+    uint32s[0] = 1;
+    if ( uint8s[0] !== 1 ) { return; }    
 
     let workingDir;
     {
@@ -494,61 +529,3 @@ HNTrieRef.prototype = {
         return hnTrieManager.setNeedle(needle).matchesWASM(this.offset);
     },
 };
-
-/*
-Benchmarking, the higher ops/sec the better.
-Firefox 65.0 on Linux i686.
-
-Test 1000 needles against small-size dictionary
-  -           Set-based x 981 ops/sec ±10.57% (46 runs sampled)
-  -         Regex-based x 5,631 ops/sec ±3.26% (54 runs sampled)
-  -    Trie-based (old) x 5,898 ops/sec ±11.80% (43 runs sampled)
-  -       Trie-based JS x 1,548 ops/sec ±10.45% (45 runs sampled)
-  -     Trie-based WASM x 3,061 ops/sec ±0.80% (59 runs sampled)
-Done.
-
-Test 1000 needles against medium-size dictionary
-  -           Set-based x 1,120 ops/sec ±7.30% (52 runs sampled)
-  -         Regex-based x 3,512 ops/sec ±0.93% (60 runs sampled)
-  -    Trie-based (old) x 3,191 ops/sec ±0.82% (59 runs sampled)
-  -       Trie-based JS x 1,713 ops/sec ±4.09% (58 runs sampled)
-  -     Trie-based WASM x 2,296 ops/sec ±0.88% (59 runs sampled)
-Done.
-
-Test 1000 needles against large-size dictionary
-  -           Set-based x 1,023 ops/sec ±17.37% (46 runs sampled)
-  -         Regex-based x 792 ops/sec ±0.90% (58 runs sampled)
-  -    Trie-based (old) x 1,758 ops/sec ±0.85% (59 runs sampled)
-  -       Trie-based JS x 1,067 ops/sec ±0.87% (59 runs sampled)
-  -     Trie-based WASM x 1,658 ops/sec ±0.75% (60 runs sampled)
-Done.
-
-
-
-Benchmarking, the higher ops/sec the better.
-Chrome 70.0.3538.77 on Ubuntu Chromium.
-
-Test 1000 needles against small-size dictionary
-  -           Set-based x 1,386 ops/sec ±18.56% (46 runs sampled)
-  -         Regex-based x 6,407 ops/sec ±1.73% (34 runs sampled)
-  -    Trie-based (old) x 7,833 ops/sec ±4.56% (56 runs sampled)
-  -       Trie-based JS x 2,825 ops/sec ±1.16% (58 runs sampled)
-  -     Trie-based WASM x 2,845 ops/sec ±0.90% (59 runs sampled)
-Done.
-
-Test 1000 needles against medium-size dictionary
-  -           Set-based x 1,790 ops/sec ±3.72% (57 runs sampled)
-  -         Regex-based x 4,259 ops/sec ±0.90% (57 runs sampled)
-  -    Trie-based (old) x 3,730 ops/sec ±0.68% (59 runs sampled)
-  -       Trie-based JS x 1,965 ops/sec ±0.81% (59 runs sampled)
-  -     Trie-based WASM x 2,068 ops/sec ±0.85% (57 runs sampled)
-Done.
-
-Test 1000 needles against large-size dictionary
-  -           Set-based x 1,508 ops/sec ±7.00% (53 runs sampled)
-  -         Regex-based x 3,042 ops/sec ±5.13% (54 runs sampled)
-  -    Trie-based (old) x 2,135 ops/sec ±3.24% (15 runs sampled)
-  -       Trie-based JS x 1,344 ops/sec ±4.78% (58 runs sampled)
-  -     Trie-based WASM x 1,470 ops/sec ±1.59% (56 runs sampled)
-Done.
-*/
