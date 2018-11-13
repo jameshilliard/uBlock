@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font: 14px sans-serif">
+<h1>HNBigTrie test</h1>
+<div><button id="test" type="button">Test!</button></div>
+<div id="stdout"></div>
+<!-- <script src="https://raw.githack.com/gorhill/uBlock/master/src/js/hnbigtrie.js"></script> -->
+<script src="../../src/js/hnbigtrie.js"></script>
+<script src="hostname-pool.js"></script>
+<script>
+const createRandomLabel = function() {
+    return Math.random().toString(36).slice(2);
+};
+
+const stdout = function(s) {
+    const line = document.createElement('div');
+    const parent = document.getElementById('stdout');
+    let tooManyErrors = false;
+    if ( parent.childElementCount > 100 ) {
+        tooManyErrors = true;
+        line.textContent = 'Too many errors, aborting';
+    } else {
+        line.textContent = s;
+    }
+    parent.appendChild(line)
+    if ( tooManyErrors ) {
+        throw 'Aborting';
+    }
+}
+
+/******************************************************************************/
+
+// Dictionary of hostnames
+//
+const FilterHostnameDict = function(hostnames) {
+    this.h = ''; // short-lived register
+    this.dict = new Set();
+    if ( hostnames !== undefined ) {
+        this.fromIterable(hostnames);
+    }
+};
+
+FilterHostnameDict.prototype = {
+    add: function(hn) {
+        if ( this.dict.has(hn) ) { return false; }
+        this.dict.add(hn);
+        return true;
+    },
+    fromIterable: function(hostnames) {
+        for ( let hn of hostnames ) {
+            this.add(hn);
+        }
+        return this;
+    },
+    matches: function(needle) {
+        while ( this.dict.has(needle) === false ) {
+            const pos = needle.indexOf('.');
+            if ( pos === -1 ) {
+                this.h = '';
+                return false;
+            }
+            needle = needle.slice(pos + 1);
+        }
+        this.h = needle;
+        return true;
+    },
+};
+
+/******************************************************************************/
+
+const testFlavor = function(hostnames, name, matchesFn, hitFn) {
+    stdout('\xA0');
+    stdout('Testing ' + name + '...');
+
+    const t0 = performance.now();
+
+    for ( let i = 0; i < hostnames.length; i++ ) {
+        // Exact hits
+        let needle = hostnames[i];
+        if ( hitFn(matchesFn(needle)) === false ) {
+            stdout('Exact hits failed: ' + needle);
+        }
+
+        // Subdomain hits
+        needle = createRandomLabel() + '.' + hostnames[i];
+        if ( hitFn(matchesFn(needle)) === false ) {
+            stdout('Subdomain hits failed: ' + needle);
+        }
+
+        // Misses batch 1
+        needle = createRandomLabel() + '.com';
+        if ( hitFn(matchesFn(needle)) !== false ) {
+            stdout('Misses batch 1: ' + needle);
+        }
+
+        // Misses batch 2
+        needle = hostnames[i] + '.' + createRandomLabel();
+        if ( hitFn(matchesFn(needle)) !== false ) {
+            stdout('Misses batch 2: ' + needle);
+        }
+
+        // Misses batch 3
+        needle = hostnames[i];
+        let pos = needle.lastIndexOf('.');
+        if ( pos !== -1 ) {
+            needle = needle.slice(0, pos) + needle.slice(pos + 1);
+            if ( hitFn(matchesFn(needle)) !== false ) {
+                stdout('Misses batch 3: ' + needle);
+            }
+        }
+    }
+
+    const t1 = performance.now();
+
+    stdout(
+        name + ': ' +
+        (hostnames.length * 5).toLocaleString() +
+        ' tests completed in ' +
+        (t1 - t0).toFixed(2) + ' ms'
+    );
+};
+
+hnBigTrieManager.readyToUse().then(( ) => {
+    let t0 = performance.now();
+    const theSet = new FilterHostnameDict(hostnamePool);
+    let t1 = performance.now();
+    stdout('\xA0');
+    stdout(
+        'Set creation completed in ' +
+        (t1 - t0).toFixed(2) + ' ms'
+    );
+
+    t0 = performance.now();
+    const theTrie = hnBigTrieManager.fromIterable(hostnamePool);
+    t1 = performance.now();
+    stdout('\xA0');
+    stdout(
+        'HNBigTrie creation completed in ' +
+        (t1 - t0).toFixed(2) + ' ms'
+    );
+
+    document.getElementById('test').addEventListener('click', ( ) => {
+        let parent = document.getElementById('stdout');
+        while ( parent.childElementCount !== 0 ) {
+            parent.removeChild(parent.firstChild);
+        }
+        testFlavor(
+            hostnamePool,
+            'Set (JS)',
+            theSet.matches.bind(theSet),
+            r => r 
+        );
+        testFlavor(
+            hostnamePool,
+            'HNBigTrie (JS)',
+            theTrie.matchesJS.bind(theTrie),
+            r => r >= 0
+        );
+        if ( hnBigTrieManager.matchesWASM instanceof Function ) {
+            testFlavor(hostnamePool, 'New Trie (WASM)', theTrie.matchesWASM.bind(theTrie), 1, 0);
+        }
+    });
+});
+
+</script>
+</body>
+</html>
