@@ -20,7 +20,7 @@
 */
 
 /* jshint bitwise: false */
-/* global punycode, hnTrieManager */
+/* global punycode, hnBigTrieManager, hnTrieManager */
 
 'use strict';
 
@@ -1062,7 +1062,7 @@ FilterDataHolderEntry.load = function(data) {
 //
 const FilterHostnameDict = function() {
     this.h = ''; // short-lived register
-    this.dict = new Set();
+    this.dict = hnBigTrieManager.create();
 };
 
 Object.defineProperty(FilterHostnameDict.prototype, 'size', {
@@ -1072,9 +1072,7 @@ Object.defineProperty(FilterHostnameDict.prototype, 'size', {
 });
 
 FilterHostnameDict.prototype.add = function(hn) {
-    if ( this.dict.has(hn) === true ) { return false; }
-    this.dict.add(hn);
-    return true;
+    return this.dict.add(hn);
 };
 
 FilterHostnameDict.prototype.remove = function(hn) {
@@ -1082,18 +1080,9 @@ FilterHostnameDict.prototype.remove = function(hn) {
 };
 
 FilterHostnameDict.prototype.match = function() {
-    // TODO: mind IP addresses
-    var pos,
-        hostname = requestHostnameRegister;
-    while ( this.dict.has(hostname) === false ) {
-        pos = hostname.indexOf('.');
-        if ( pos === -1 ) {
-            this.h = '';
-            return false;
-        }
-        hostname = hostname.slice(pos + 1);
-    }
-    this.h = hostname;
+    const pos = this.dict.matches(requestHostnameRegister);
+    if ( pos === -1 ) { return false; }
+    this.h = requestHostnameRegister.slice(pos);
     return true;
 };
 
@@ -1110,8 +1099,11 @@ FilterHostnameDict.prototype.compile = function() {
 };
 
 FilterHostnameDict.load = function(args) {
-    var f = new FilterHostnameDict();
-    f.dict = new Set(args[1]);
+    const f = new FilterHostnameDict();
+    f.dict = hnBigTrieManager.create();
+    for ( const hn of args[1] ) {
+        f.dict.add(hn);
+    }
     return f;
 };
 
@@ -1975,6 +1967,7 @@ FilterContainer.prototype.reset = function() {
 
     // This will invalidate all hn tries throughout uBO:
     hnTrieManager.reset();
+    hnBigTrieManager.reset();
 
     // Runtime registers
     this.cbRegister = undefined;
@@ -1985,20 +1978,20 @@ FilterContainer.prototype.reset = function() {
 /******************************************************************************/
 
 FilterContainer.prototype.freeze = function() {
-    let filterPairId = FilterPair.fid,
+    const filterPairId = FilterPair.fid,
         filterBucketId = FilterBucket.fid,
         filterDataHolderId = FilterDataHolder.fid,
         redirectTypeValue = typeNameToTypeValue.redirect,
         unserialize = µb.CompiledLineIO.unserialize;
 
-    for ( let line of this.goodFilters ) {
+    for ( const line of this.goodFilters ) {
         if ( this.badFilters.has(line) ) {
             this.discardedCount += 1;
             continue;
         }
 
-        let args = unserialize(line);
-        let bits = args[0];
+        const args = unserialize(line);
+        const bits = args[0];
 
         // Special cases: delegate to more specialized engines.
         // Redirect engine.
@@ -2008,8 +2001,8 @@ FilterContainer.prototype.freeze = function() {
         }
 
         // Plain static filters.
-        let tokenHash = args[1];
-        let fdata = args[2];
+        const tokenHash = args[1];
+        const fdata = args[2];
 
         // Special treatment: data-holding filters are stored separately
         // because they require special matching algorithm (unlike other
@@ -2063,6 +2056,7 @@ FilterContainer.prototype.freeze = function() {
 
     this.filterParser.reset();
     this.goodFilters = new Set();
+    hnBigTrieManager.optimize();
     this.frozen = true;
 };
 
@@ -2072,7 +2066,10 @@ FilterContainer.prototype.freeze = function() {
 // on asynchronous operations (ex.: when loading a wasm module).
 
 FilterContainer.prototype.readyToUse = function() {
-    return hnTrieManager.readyToUse();
+    return Promise.all([
+        hnTrieManager.readyToUse(),
+        hnBigTrieManager.readyToUse(),
+    ]);
 };
 
 /******************************************************************************/
@@ -2140,6 +2137,8 @@ FilterContainer.prototype.fromSelfie = function(selfie) {
         }
         this.dataFilters.set(entry.tokenHash, entry);
     }
+
+    hnBigTrieManager.optimize();
 };
 
 /******************************************************************************/

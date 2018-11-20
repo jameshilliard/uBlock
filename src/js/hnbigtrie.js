@@ -56,18 +56,21 @@ const hnBigTrieManager = {
     wasmLoading: null,
     wasmMemory: null,
     segments: new Map(),
+    savedByteCount: 0,
 
     reset: function() {
         if ( this.wasmMemory === null && this.buf.byteLength > 131072 ) {
-            this.buf.byteLength = new Uint8Array(131072);
+            this.buf = new Uint8Array(131072);
+            this.buf32 = null;
         } else {
             this.buf.fill(0);
         }
         this.trie0 = this.trie1 = 256;
-        this.char0 = this.char1 = 65536;
+        this.char0 = this.char1 = this.buf.length >>> 1;
         this.segments = new Map();
         this.needle = '';
         this.id += 1;
+        this.savedByteCount = 0;
     },
 
     readyToUse: function() {
@@ -80,7 +83,7 @@ const hnBigTrieManager = {
         if ( needle !== this.needle ) {
             const buf = this.buf;
             let i = needle.length;
-            if ( i > 255 ) { i = 255; }
+            if ( i > 254 ) { i = 254; }
             buf[255] = i;
             while ( i-- ) {
                 buf[i] = needle.charCodeAt(i);
@@ -94,27 +97,38 @@ const hnBigTrieManager = {
         let ineedle = this.buf[255];
         if ( ineedle === 0 ) { return -1; }
         let icell = iroot;
-        while ( icell !== 0 ) {
-            const vcell3 = this.buf32[icell+2];
-            const imismatch = this.indexOfMismatch(vcell3, ineedle);
-            // first character does not match: move to next descendant
-            if ( imismatch === 0 ) {
+        do {
+            const v = this.buf32[icell+2];
+            let slen = v >>> 24;
+            let i0 = this.char0 + (v & 0x00FFFFFF);
+            // if first character does not match, move to next descendant
+            if ( this.buf[i0] !== this.buf[ineedle-1] ) {
                 icell = this.buf32[icell+0];
                 continue;
             }
+            ineedle -= 1;
             // all characters in segment must match
-            if ( imismatch < (vcell3 >>> 24) ) { return -1; }
-            // adjust characters left to process in hostname
-            ineedle -= imismatch;
+            if ( slen > 1 ) {
+                slen -= 1;
+                if ( slen > ineedle ) { return -1; }
+                i0 += 1;
+                const i1 = i0 + slen;
+                do {
+                    ineedle -= 1;
+                    if ( this.buf[i0] !== this.buf[ineedle] ) { return -1; }
+                    i0 += 1;
+                } while ( i0 < i1 );
+            }
+            // next segment
             icell = this.buf32[icell+1];
-            if ( this.buf32[icell+2] === 0 ) {
-                if ( this.labelBoundary(ineedle) ) {
-                    return 1;
+            if ( icell !== 0 && this.buf32[icell+2] === 0 ) {
+                if ( ineedle === 0 || this.buf[ineedle-1] === 0x2E ) {
+                    return ineedle;
                 }
                 icell = this.buf32[icell+1];
             }
-        }
-        return this.labelBoundary(ineedle) ? ineedle : -1;
+        } while ( icell !== 0 );
+        return ineedle === 0 || this.buf[ineedle-1] === 0x2E ? ineedle : -1;
     },
     matchesWASM: null,
     matches: null,
@@ -140,7 +154,7 @@ const hnBigTrieManager = {
         if ( this.buf32[icell+2] === 0 ) {
             this.buf32[icell+0] = 0;
             this.buf32[icell+1] = 0;
-            this.buf32[icell+2] = this.storeSegment(ihnchar);
+            this.buf32[icell+2] = this.addSegment(ihnchar);
             return 1;
         }
         // find a matching cell: move down
@@ -161,7 +175,7 @@ const hnBigTrieManager = {
                     icell = inext;
                     continue;
                 }
-                this.buf32[icell+0] = this.newCell(0, 0, this.storeSegment(ihnchar));
+                this.buf32[icell+0] = this.addCell(0, 0, this.addSegment(ihnchar));
                 return 1;
             }
 
@@ -179,15 +193,15 @@ const hnBigTrieManager = {
                         continue;
                     }
                     // boundary cell + needle remainder
-                    this.buf32[icell+1] = this.newCell(0, 0, 0);
-                    this.buf32[this.buf32[icell+1]+1] = this.newCell(0, 0, this.storeSegment(ihnchar));
+                    this.buf32[icell+1] = this.addCell(0, 0, 0);
+                    this.buf32[this.buf32[icell+1]+1] = this.addCell(0, 0, this.addSegment(ihnchar));
                     return 1;
                 }
                 // needle remainder: no
                 // boundary cell already present
                 if ( inext === 0 || this.buf32[inext+2] === 0 ) { return 0; }
                 // need boundary cell
-                this.buf32[icell+1] = this.newCell(0, this.buf32[icell+1], 0);
+                this.buf32[icell+1] = this.addCell(0, this.buf32[icell+1], 0);
                 return 1;
             }
 
@@ -195,14 +209,14 @@ const hnBigTrieManager = {
             // split current cell
             const isegchar = v & 0x00FFFFFF;
             this.buf32[icell+2] = (imismatch << 24) | isegchar;
-            this.buf32[icell+1] = this.newCell(0, this.buf32[icell+1], (lsegchar - imismatch) << 24 | (isegchar + imismatch));
+            this.buf32[icell+1] = this.addCell(0, this.buf32[icell+1], (lsegchar - imismatch) << 24 | (isegchar + imismatch));
             // needle remainder: yes
             if ( ihnchar !== 0 ) {
-                this.buf32[this.buf32[icell+1]+0] = this.newCell(0, 0, this.storeSegment(ihnchar));
+                this.buf32[this.buf32[icell+1]+0] = this.addCell(0, 0, this.addSegment(ihnchar));
                 return 1;
             }
             // needle remainder: no
-            this.buf32[icell+1] = this.newCell(0, this.buf32[icell+1], 0);
+            this.buf32[icell+1] = this.addCell(0, this.buf32[icell+1], 0);
             return 1;
         }
     },
@@ -221,7 +235,7 @@ const hnBigTrieManager = {
         return trieRef;
     },
 
-    newCell: function(idown, iright, v) {
+    addCell: function(idown, iright, v) {
         const icell = this.trie1 >>> 2;
         this.trie1 += 12;
         this.buf32[icell+0] = idown;
@@ -230,7 +244,7 @@ const hnBigTrieManager = {
         return icell;
     },
 
-    storeSegment: function(len) {
+    addSegment: function(len) {
         if ( len === 0 ) { return 0; }
         const segment = this.needle.slice(0, len);
         let ichar = this.segments.get(segment);
@@ -241,26 +255,25 @@ const hnBigTrieManager = {
             while ( i-- ) {
                 this.buf[this.char1++] = this.buf[i];
             }
+        } else {
+            this.savedByteCount += len;
         }
         return (len << 24) | ichar;
     },
 
-    indexOfMismatch: function(vcell, ineedle) {
-        let n = vcell >>> 24;
+    indexOfMismatch: function(v, ineedle) {
+        let n = v >>> 24;
         if ( n > ineedle ) { n = ineedle; }
-        if ( n === 0 ) { return 0; }
-        const i0 = this.char0 + (vcell & 0x00FFFFFF);
+        const i0 = this.char0 + (v & 0x00FFFFFF);
         const i1 = i0 + n;
-        let i = 0;
-        while ( i0 + i < i1 ) {
-            if ( this.buf[i0+i] !== this.buf[ineedle-1-i] ) { break; }
+        let i = i0;
+        let j = ineedle;
+        while ( i < i1 ) {
+            j -= 1;
+            if ( this.buf[i] !== this.buf[j] ) { break; }
             i += 1;
         }
-        return i;
-    },
-
-    labelBoundary: function(i) {
-        return i === 0 || this.buf[i-1] === 0x2E;
+        return i - i0;
     },
 
     growBuf: function() {
@@ -319,6 +332,15 @@ const hnBigTrieManager = {
         return;
     }
 
+    // Soft-dependency on µBlock's advanced settings so that the code here can
+    // be used outside of uBO (i.e. tests, benchmarks)
+    if (
+        typeof µBlock === 'object' &&
+        µBlock.hiddenSettings.disableWebAssembly === true
+    ) {
+        return;
+    }
+
     // The wasm module will work only if CPU is natively little-endian,
     // as we use native uint32 array in our trie-creation js code.
     const uint32s = new Uint32Array(1);
@@ -339,7 +361,7 @@ const hnBigTrieManager = {
         workingDir = url.href;
     }
 
-    const memory = new WebAssembly.Memory({ initial: 1 });
+    const memory = new WebAssembly.Memory({ initial: 2 });
 
     hnBigTrieManager.wasmLoading = WebAssembly.instantiateStreaming(
         fetch(workingDir + 'wasm/hnbigtrie.wasm'),
@@ -351,11 +373,11 @@ const hnBigTrieManager = {
         if ( pageCount > 1 ) {
             memory.grow(pageCount - 1);
         }
-        const trie = new Uint8Array(memory.buffer);
-        trie.set(hnBigTrieManager.trie);
-        hnBigTrieManager.trie = trie;
-        if ( hnBigTrieManager.trie32 !== null ) {
-            hnBigTrieManager.trie32 = new Uint32Array(memory.buffer);
+        const buf = new Uint8Array(memory.buffer);
+        buf.set(hnBigTrieManager.buf);
+        hnBigTrieManager.buf = buf;
+        if ( hnBigTrieManager.buf32 !== null ) {
+            hnBigTrieManager.buf32 = new Uint32Array(buf.buffer);
         }
         hnBigTrieManager.wasmMemory = memory;
         hnBigTrieManager.matchesWASM = result.instance.exports.matches;
@@ -371,11 +393,65 @@ const hnBigTrieManager = {
 const HNBigTrieRef = function(iroot) {
     this.id = hnBigTrieManager.id;
     this.iroot = iroot;
+    this.size = 0;
 };
 
 HNBigTrieRef.prototype = {
     add: function(hn) {
-        hnBigTrieManager.setNeedle(hn).add(this.iroot);
+        if ( hnBigTrieManager.setNeedle(hn).add(this.iroot) === 1 ) {
+            this.size += 1;
+            return true;
+        }
+        return false;
+    },
+    [Symbol.iterator]: function() {
+        return {
+            value: undefined,
+            done: false,
+            next: function() {
+                if ( this.icell === 0 ) {
+                    if ( this.forks.length === 0 ) {
+                        this.value = undefined;
+                        this.done = true;
+                        return this;
+                    }
+                    const entry = this.forks.pop();
+                    this.icell = entry.icell;
+                    this.chars.length = entry.len;
+                }
+                for (;;) {
+                    const idown = hnBigTrieManager.buf32[this.icell+0];
+                    if ( idown !== 0 ) {
+                        this.forks.push({
+                            icell: idown,
+                            len: this.chars.length
+                        });
+                    }
+                    const v = hnBigTrieManager.buf32[this.icell+2];
+                    let i0 = hnBigTrieManager.char0 + (v & 0x00FFFFFF);
+                    const i1 = i0 + (v >>> 24);
+                    while ( i0 < i1 ) {
+                        this.chars.push(hnBigTrieManager.buf[i0]);
+                        i0 += 1;
+                    }
+                    this.icell = hnBigTrieManager.buf32[this.icell+1];
+                    if ( this.icell === 0 ) {
+                        return this.toHostname();
+                    }
+                    if ( hnBigTrieManager.buf32[this.icell+2] === 0 ) {
+                        this.icell = hnBigTrieManager.buf32[this.icell+1];
+                        return this.toHostname();
+                    }
+                }
+            },
+            toHostname: function() {
+                this.value = String.fromCharCode(...this.chars.slice().reverse());
+                return this;
+            },
+            icell: this.iroot,
+            chars: [],
+            forks: [],
+        };
     },
     isValid: function() {
         return this.id === hnBigTrieManager.id;
