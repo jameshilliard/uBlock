@@ -415,23 +415,20 @@ HNBigTrieRef.prototype = {
                         this.done = true;
                         return this;
                     }
-                    const entry = this.forks.pop();
-                    this.icell = entry.icell;
-                    this.chars.length = entry.len;
+                    this.charPtr = this.forks.pop();
+                    this.icell = this.forks.pop();
                 }
                 for (;;) {
                     const idown = hnBigTrieManager.buf32[this.icell+0];
                     if ( idown !== 0 ) {
-                        this.forks.push({
-                            icell: idown,
-                            len: this.chars.length
-                        });
+                        this.forks.push(idown, this.charPtr);
                     }
                     const v = hnBigTrieManager.buf32[this.icell+2];
                     let i0 = hnBigTrieManager.char0 + (v & 0x00FFFFFF);
                     const i1 = i0 + (v >>> 24);
                     while ( i0 < i1 ) {
-                        this.chars.push(hnBigTrieManager.buf[i0]);
+                        this.charPtr -= 1;
+                        this.charBuf[this.charPtr] = hnBigTrieManager.buf[i0];
                         i0 += 1;
                     }
                     this.icell = hnBigTrieManager.buf32[this.icell+1];
@@ -445,12 +442,16 @@ HNBigTrieRef.prototype = {
                 }
             },
             toHostname: function() {
-                this.value = String.fromCharCode(...this.chars.slice().reverse());
+                this.value = this.textDecoder.decode(
+                    new Uint8Array(this.charBuf.buffer, this.charPtr)
+                );
                 return this;
             },
             icell: this.iroot,
-            chars: [],
+            charBuf: new Uint8Array(256),
+            charPtr: 256,
             forks: [],
+            textDecoder: new TextDecoder()
         };
     },
     isValid: function() {
