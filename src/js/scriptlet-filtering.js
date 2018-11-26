@@ -26,15 +26,15 @@
 µBlock.scriptletFilteringEngine = (function() {
     let api = {};
 
-    let µb = µBlock,
-        scriptletDB = new µb.staticExtFilteringEngine.HostnameBasedDB(),
+    const µb = µBlock,
         duplicates = new Set(),
-        acceptedCount = 0,
-        discardedCount = 0,
         scriptletCache = new µb.MRUCache(32),
-        exceptionsRegister = new Set(),
         scriptletsRegister = new Map(),
+        exceptionsRegister = new Set(),
         reEscapeScriptArg = /[\\'"]/g;
+    let acceptedCount = 0,
+        discardedCount = 0,
+        scriptletDB = new µb.staticExtFilteringEngine.HostnameBasedDB();
 
     // Purpose of `contentscriptCode` below is too programmatically inject
     // content script code which only purpose is to inject scriptlets. This
@@ -58,8 +58,8 @@
     // Consequently, the programmatic-injection code path is taken only with
     // Chromium-based browsers.
 
-    let contentscriptCode = (function() {
-        let parts = [
+    const contentscriptCode = (function() {
+        const parts = [
             '(',
             function(hostname, scriptlets) {
                 if (
@@ -163,7 +163,7 @@
         };
     })();
     
-    let lookupScriptlet = function(raw, reng, toInject) {
+    const lookupScriptlet = function(raw, reng, toInject) {
         if ( toInject.has(raw) ) { return; }
         if ( scriptletCache.resetTime < reng.modifyTime ) {
             scriptletCache.reset();
@@ -196,7 +196,7 @@
     // Fill template placeholders. Return falsy if:
     // - At least one argument contains anything else than /\w/ and `.`
 
-    let patchScriptlet = function(content, args) {
+    const patchScriptlet = function(content, args) {
         var i = 1,
             pos, arg;
         while ( args !== '' ) {

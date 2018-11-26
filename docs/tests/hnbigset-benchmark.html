@@ -15,8 +15,8 @@
 <div id="results-5" style="white-space:pre;font-family:mono"></div>
 <div id="results-6" style="white-space:pre;font-family:mono"></div>
 
-<!-- <script src="https://raw.githack.com/gorhill/uBlock/master/src/js/hnbigtrie.js"></script> -->
-<script src="../../src/js/hnbigtrie.js"></script>
+<script src="https://raw.githack.com/gorhill/uBlock/master/src/js/hnbigtrie.js"></script>
+<!-- <script src="../../src/js/hnbigtrie.js"></script> -->
 <script src="hostname-pool.js"></script>
 
 <script src="https://cdn.jsdelivr.net/lodash/4.17.2/lodash.min.js"></script>
@@ -48,7 +48,7 @@ const hostnameLists = (function() {
         for ( let i = 0; i < n; i++ ) {
             dict.push(randomHostname());
         }
-        dicts.push(dict);
+        dicts.unshift(dict);
         n = n >>> 2;
     }
     return dicts;
@@ -72,8 +72,10 @@ var setBasedDictTest = function(haystack, needle) {
 
 /******************************************************************************/
 
+const hnBigTrieContainer = new HNBigTrieContainer();
+
 var trieBasedDictCreate = function(hostnames) {
-    return hnBigTrieManager.fromIterable(hostnames);
+    return hnBigTrieContainer.fromIterable(hostnames);
 }
 
 var trieBasedDictTest = function(haystack, needle) {
@@ -146,7 +148,7 @@ function initBenchmarks() {
                 createDict(setBasedDictCreate);
                 })
             .add('  -          Trie-based', function() {
-                hnBigTrieManager.reset();
+                hnBigTrieContainer.reset();
                 createDict(trieBasedDictCreate);
                 })
             .on('start', function() {
@@ -187,6 +189,9 @@ function initBenchmarks() {
             .add('  -       Trie-based JS', function() {
                 lookupDict(bigTrieDicts, trieBasedDictTest);
                 })
+            .add('  -     Trie-based WASM', function() {
+                lookupDict(bigTrieDicts, trieBasedDictTestWASM);
+                })
             .on('start', function() {
                 for ( let i = 0; i < lookupCount; i++ ) {
                     needles[i] = randomNeedle();
@@ -194,29 +199,30 @@ function initBenchmarks() {
                 setDicts = [];
                 bigTrieDicts = [];
                 results = [];
-                hnBigTrieManager.reset();
+                hnBigTrieContainer.reset();
                 for ( const hostnameList of hostnameLists ) {
                     setDicts.push(setBasedDictCreate(hostnameList));
                     bigTrieDicts.push(trieBasedDictCreate(hostnameList));
                 }
-
+                hnBigTrieContainer.optimize();
                 stdout(gWhich, '');
-                stdout(gWhich, 'Test ' + lookupCount + ' needles against a dictionary of ' + hostnamePool.length + ' hostnames\n');
+                stdout(
+                    gWhich,
+                    'Test ' + lookupCount +
+                    ' needles against ' + setDicts.length +
+                    ' dictionaries with size between ' + hostnameLists[0].length +
+                    ' and ' + hostnameLists[hostnameLists.length-1].length +
+                    ' hostnames\n'
+                );
                })
             .on('cycle', function(event) {
                 stdout(gWhich, String(event.target) + '\n');
                 })
             .on('complete', ( ) => {
                 setDicts = bigTrieDicts = results = [];
-                hnBigTrieManager.reset();
+                hnBigTrieContainer.reset();
                 exitBenchmark();
                 });
-
-        if ( hnBigTrieManager.matchesWASM !== null ) {
-            bms.add('  -     Trie-based WASM', function() {
-                lookupDict(bigTrieDicts, trieBasedDictTestWASM);
-            })
-        }
 
         return bms;
     })());
@@ -224,7 +230,7 @@ function initBenchmarks() {
 
 /******************************************************************************/
 
-hnBigTrieManager.readyToUse().then(( ) => {
+hnBigTrieContainer.readyToUse().then(( ) => {
     initBenchmarks();
 });
 

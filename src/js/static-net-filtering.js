@@ -20,7 +20,7 @@
 */
 
 /* jshint bitwise: false */
-/* global punycode, hnBigTrieManager, hnTrieManager */
+/* global punycode, HNBigTrieContainer, hnTrieManager */
 
 'use strict';
 
@@ -1059,48 +1059,71 @@ FilterDataHolderEntry.load = function(data) {
 /******************************************************************************/
 
 // Dictionary of hostnames
-//
+
 const FilterHostnameDict = function() {
     this.h = ''; // short-lived register
-    this.dict = hnBigTrieManager.create();
+    this.dict = FilterHostnameDict.trieContainer.create();
 };
 
-Object.defineProperty(FilterHostnameDict.prototype, 'size', {
-    get: function() {
+FilterHostnameDict.prototype = {
+    get size() {
         return this.dict.size;
+    },
+    add: function(hn) {
+        return this.dict.add(hn);
+    },
+    match: function() {
+        const pos = this.dict.matches(requestHostnameRegister);
+        if ( pos === -1 ) { return false; }
+        this.h = requestHostnameRegister.slice(pos);
+        return true;
+    },
+    logData: function() {
+        return {
+            raw: '||' + this.h + '^',
+            regex: rawToRegexStr(this.h, 0) + '(?:[^%.0-9a-z_-]|$)',
+            compiled: this.h
+        };
+    },
+    compile: function() {
+        return [ this.fid, Array.from(this.dict) ];
+    },
+};
+
+// TODO: save/restore memory buffer size so as to minimize memory re-allocation
+// as tries are created/populated. Most likely scenario is that the size of the
+// memory buffer needed will be the same as the usage seen at last optimize()
+// call.
+FilterHostnameDict.trieContainer = (function() {
+    let trieDetails;
+    try {
+        trieDetails = JSON.parse(
+            vAPI.localStorage.getItem('FilterHostnameDict.trieDetails')
+        );
+    } catch(ex) {
     }
-});
+    return new HNBigTrieContainer(trieDetails);
+})();
 
-FilterHostnameDict.prototype.add = function(hn) {
-    return this.dict.add(hn);
+FilterHostnameDict.readyToUse = function() {
+    return FilterHostnameDict.trieContainer.readyToUse();
 };
 
-FilterHostnameDict.prototype.remove = function(hn) {
-    return this.dict.delete(hn);
+FilterHostnameDict.reset = function() {
+    return FilterHostnameDict.trieContainer.reset();
 };
 
-FilterHostnameDict.prototype.match = function() {
-    const pos = this.dict.matches(requestHostnameRegister);
-    if ( pos === -1 ) { return false; }
-    this.h = requestHostnameRegister.slice(pos);
-    return true;
-};
-
-FilterHostnameDict.prototype.logData = function() {
-    return {
-        raw: '||' + this.h + '^',
-        regex: rawToRegexStr(this.h, 0) + '(?:[^%.0-9a-z_-]|$)',
-        compiled: this.h
-    };
-};
-
-FilterHostnameDict.prototype.compile = function() {
-    return [ this.fid, Array.from(this.dict) ];
+FilterHostnameDict.optimize = function() {
+    const trieDetails = FilterHostnameDict.trieContainer.optimize();
+    vAPI.localStorage.setItem(
+        'FilterHostnameDict.trieDetails',
+        JSON.stringify(trieDetails)
+    );
 };
 
 FilterHostnameDict.load = function(args) {
     const f = new FilterHostnameDict();
-    f.dict = hnBigTrieManager.create();
+    f.dict = FilterHostnameDict.trieContainer.create();
     for ( const hn of args[1] ) {
         f.dict.add(hn);
     }
@@ -1967,7 +1990,7 @@ FilterContainer.prototype.reset = function() {
 
     // This will invalidate all hn tries throughout uBO:
     hnTrieManager.reset();
-    hnBigTrieManager.reset();
+    FilterHostnameDict.reset();
 
     // Runtime registers
     this.cbRegister = undefined;
@@ -2056,7 +2079,7 @@ FilterContainer.prototype.freeze = function() {
 
     this.filterParser.reset();
     this.goodFilters = new Set();
-    hnBigTrieManager.optimize();
+    FilterHostnameDict.optimize();
     this.frozen = true;
 };
 
@@ -2067,8 +2090,7 @@ FilterContainer.prototype.freeze = function() {
 
 FilterContainer.prototype.readyToUse = function() {
     return Promise.all([
-        hnTrieManager.readyToUse(),
-        hnBigTrieManager.readyToUse(),
+        hnTrieManager.readyToUse()
     ]);
 };
 
@@ -2138,7 +2160,7 @@ FilterContainer.prototype.fromSelfie = function(selfie) {
         this.dataFilters.set(entry.tokenHash, entry);
     }
 
-    hnBigTrieManager.optimize();
+    FilterHostnameDict.optimize();
 };
 
 /******************************************************************************/

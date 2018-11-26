@@ -8,8 +8,8 @@
 <h1>HNBigTrie test</h1>
 <div><button id="test" type="button">Test!</button></div>
 <div id="stdout"></div>
-<!-- <script src="https://raw.githack.com/gorhill/uBlock/master/src/js/hnbigtrie.js"></script> -->
-<script src="../../src/js/hnbigtrie.js"></script>
+<script src="https://raw.githack.com/gorhill/uBlock/master/src/js/hnbigtrie.js"></script>
+<!-- <script src="../../src/js/hnbigtrie.js"></script> -->
 <script src="hostname-pool.js"></script>
 <script>
 const createRandomLabel = function() {
@@ -124,7 +124,9 @@ const testFlavor = function(hostnames, name, matchesFn, hitFn) {
     );
 };
 
-hnBigTrieManager.readyToUse().then(( ) => {
+const hnBigTrieContainer = new HNBigTrieContainer();
+
+hnBigTrieContainer.readyToUse().then(( ) => {
     let t0 = performance.now();
     const theSet = new FilterHostnameDict(hostnamePool);
     let t1 = performance.now();
@@ -135,7 +137,8 @@ hnBigTrieManager.readyToUse().then(( ) => {
     );
 
     t0 = performance.now();
-    const theTrie = hnBigTrieManager.fromIterable(hostnamePool);
+    const theTrie = hnBigTrieContainer.fromIterable(hostnamePool);
+    hnBigTrieContainer.optimize();
     t1 = performance.now();
     stdout('\xA0');
     stdout(
@@ -160,8 +163,13 @@ hnBigTrieManager.readyToUse().then(( ) => {
             theTrie.matchesJS.bind(theTrie),
             r => r >= 0
         );
-        if ( hnBigTrieManager.matchesWASM instanceof Function ) {
-            testFlavor(hostnamePool, 'New Trie (WASM)', theTrie.matchesWASM.bind(theTrie), 1, 0);
+        if ( hnBigTrieContainer.matchesWASM instanceof Function ) {
+            testFlavor(
+                hostnamePool,
+                'New Trie (WASM)',
+                theTrie.matchesWASM.bind(theTrie),
+                r => r >= 0
+            );
         }
     });
 });
