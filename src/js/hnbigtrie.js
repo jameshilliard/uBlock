@@ -66,6 +66,7 @@ const HNBigTrieContainer = function(details) {
     this.buf32[HNBIGTRIE_CHAR1_SLOT] = this.buf32[HNBIGTRIE_CHAR0_SLOT];
     this.wasmInstancePromise = null;
     this.wasmMemory = null;
+    this.readyToUse();
 };
 
                                                                 // i32 /  i8
@@ -242,14 +243,6 @@ HNBigTrieContainer.prototype = {
 
     optimize: function() {
         this.shrinkBuf();
-        if (
-            this.matchesWASM === null &&
-            HNBigTrieContainer.wasmModulePromise !== null
-        ) {
-            HNBigTrieContainer.wasmModulePromise.then(module => {
-                this.initWASM(module);
-            });
-        }
         return {
             byteLength: this.buf.byteLength,
             char0: this.buf32[HNBIGTRIE_CHAR0_SLOT],
@@ -290,12 +283,14 @@ HNBigTrieContainer.prototype = {
     },
 
     indexOfMismatch: function(v, ineedle) {
-        let n = v >>> 24;
-        if ( n > ineedle ) { n = ineedle; }
         const i0 = this.buf32[HNBIGTRIE_CHAR0_SLOT] + (v & 0x00FFFFFF);
+        if ( this.buf[i0] !== this.buf[ineedle-1] ) { return 0; }
+        let n = v >>> 24;
+        if ( n === 1 ) { return 1; }
+        if ( n > ineedle ) { n = ineedle; }
         const i1 = i0 + n;
-        let i = i0;
-        let j = ineedle;
+        let i = i0 + 1;
+        let j = ineedle - 1;
         while ( i < i1 ) {
             j -= 1;
             if ( this.buf[i] !== this.buf[j] ) { break; }
@@ -315,10 +310,7 @@ HNBigTrieContainer.prototype = {
             (this.buf32[HNBIGTRIE_TRIE1_SLOT] + 24 + 65535) & ~65535,
             this.buf32[HNBIGTRIE_CHAR0_SLOT]
         );
-        const char1 = Math.max(
-            char0 + this.buf32[HNBIGTRIE_CHAR1_SLOT] - this.buf32[HNBIGTRIE_CHAR0_SLOT],
-            this.buf32[HNBIGTRIE_CHAR1_SLOT]
-        );
+        const char1 = char0 + this.buf32[HNBIGTRIE_CHAR1_SLOT] - this.buf32[HNBIGTRIE_CHAR0_SLOT];
         const buf1 = Math.max(
             (char1 + 256 + 65535) & ~65535,
             this.buf.length
@@ -501,7 +493,7 @@ HNBigTrieRef.prototype = {
                         this.forks.push(idown, this.charPtr);
                     }
                     const v = this.container.buf32[this.icell+2];
-                    let i0 = this.container.char0 + (v & 0x00FFFFFF);
+                    let i0 = this.container.buf32[HNBIGTRIE_CHAR0_SLOT] + (v & 0x00FFFFFF);
                     const i1 = i0 + (v >>> 24);
                     while ( i0 < i1 ) {
                         this.charPtr -= 1;
