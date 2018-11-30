@@ -124,9 +124,13 @@ const testFlavor = function(hostnames, name, matchesFn, hitFn) {
     );
 };
 
-const hnBigTrieContainer = new HNBigTrieContainer();
+const hnBigTrieJS = new HNBigTrieContainer();
+const hnBigTrieWASM = new HNBigTrieContainer();
 
-hnBigTrieContainer.readyToUse().then(( ) => {
+Promise.all([
+    hnBigTrieJS.readyToUse(),
+    hnBigTrieWASM.readyToUse()
+]).then(( ) => {
     let t0 = performance.now();
     const theSet = new FilterHostnameDict(hostnamePool);
     let t1 = performance.now();
@@ -137,14 +141,36 @@ hnBigTrieContainer.readyToUse().then(( ) => {
     );
 
     t0 = performance.now();
-    const theTrie = hnBigTrieContainer.fromIterable(hostnamePool);
-    hnBigTrieContainer.optimize();
+    const theTrieJS = hnBigTrieJS.fromIterable(hostnamePool, 'addJS');
+    hnBigTrieJS.optimize();
     t1 = performance.now();
     stdout('\xA0');
     stdout(
-        'HNBigTrie creation completed in ' +
+        'HNBigTrie creation (JS) completed in ' +
         (t1 - t0).toFixed(2) + ' ms'
     );
+
+    let theTrieWASM;
+    if ( hnBigTrieWASM.addWASM instanceof Function ) {
+        t0 = performance.now();
+        theTrieWASM = hnBigTrieWASM.fromIterable(hostnamePool, 'addWASM');
+        hnBigTrieWASM.optimize();
+        t1 = performance.now();
+        stdout('\xA0');
+        stdout(
+            'HNBigTrie creation (WASM) completed in ' +
+            (t1 - t0).toFixed(2) + ' ms'
+        );
+
+        const bufJS = theTrieJS.container.buf;
+        const bufWASM = theTrieWASM.container.buf;
+        for ( let i = 0; i < bufJS.length; i++ ) {
+            if ( bufJS[i] !== bufWASM[i] ) {
+                stdout('theTrieWASM failure at index ' + i);
+                break;
+            }
+        }
+    }
 
     document.getElementById('test').addEventListener('click', ( ) => {
         let parent = document.getElementById('stdout');
@@ -160,14 +186,14 @@ hnBigTrieContainer.readyToUse().then(( ) => {
         testFlavor(
             hostnamePool,
             'HNBigTrie (JS)',
-            theTrie.matchesJS.bind(theTrie),
+            theTrieJS.matchesJS.bind(theTrieJS),
             r => r >= 0
         );
-        if ( hnBigTrieContainer.matchesWASM instanceof Function ) {
+        if ( theTrieWASM !== undefined ) {
             testFlavor(
                 hostnamePool,
                 'HNBigTrie (WASM)',
-                theTrie.matchesWASM.bind(theTrie),
+                theTrieWASM.matchesWASM.bind(theTrieWASM),
                 r => r >= 0
             );
         }

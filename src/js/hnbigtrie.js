@@ -20,7 +20,7 @@
 */
 
 /* globals WebAssembly */
-/* exported HNBigTrie */
+/* exported HNBigTrieContainer */
 
 'use strict';
 
@@ -165,81 +165,105 @@ HNBigTrieContainer.prototype = {
         return new HNBigTrieRef(this, iroot);
     },
 
-    add: function(iroot) {
-        let ihnchar = this.buf[255];
-        if ( ihnchar === 0 ) { return 0; }
-        this.growBuf();
+    addJS: function(iroot) {
+        let lhnchar = this.buf[255];
+        if ( lhnchar === 0 ) { return 0; }
         let icell = iroot;
         // special case: first node in trie
         if ( this.buf32[icell+2] === 0 ) {
-            this.buf32[icell+0] = 0;
-            this.buf32[icell+1] = 0;
-            this.buf32[icell+2] = this.addSegment(ihnchar);
+            this.buf32[icell+2] = this.addSegment(lhnchar);
             return 1;
         }
+        // grow buffer if needed
+        if (
+            (this.buf32[HNBIGTRIE_CHAR0_SLOT] - this.buf32[HNBIGTRIE_TRIE1_SLOT]) < 24 ||
+            (this.buf.length - this.buf32[HNBIGTRIE_CHAR1_SLOT]) < 256
+        ) {
+            this.growBuf();
+        }
+        //
+        const char0 = this.buf32[HNBIGTRIE_CHAR0_SLOT];
+        let inext;
         // find a matching cell: move down
         for (;;) {
-            const v = this.buf32[icell+2];
+            const vseg = this.buf32[icell+2];
             // skip boundary cells
-            if ( v === 0 ) {
+            if ( vseg === 0 ) {
                 icell = this.buf32[icell+1];
                 continue;
             }
-            const imismatch = this.indexOfMismatch(v, ihnchar);
-            let inext;
-            // first character does not match: move to descendant
-            if ( imismatch === 0 ) {
-                // next descendant
+            let isegchar0 = char0 + (vseg & 0x00FFFFFF);
+            // if first character is no match, move to next descendant
+            if ( this.buf[isegchar0] !== this.buf[lhnchar-1] ) {
                 inext = this.buf32[icell+0];
-                if ( inext !== 0 ) {
-                    icell = inext;
-                    continue;
+                if ( inext === 0 ) {
+                    this.buf32[icell+0] = this.addCell(0, 0, this.addSegment(lhnchar));
+                    return 1;
                 }
-                this.buf32[icell+0] = this.addCell(0, 0, this.addSegment(ihnchar));
-                return 1;
+                icell = inext;
+                continue;
             }
-
-            // first character(s) is(are) a match
-            //
-            // adjust characters left to process in hostname
-            ihnchar -= imismatch;
-            const lsegchar = v >>> 24;
-            inext = this.buf32[icell+1];
-            if ( imismatch === lsegchar ) {
+            // 1st character was tested
+            let isegchar = 1;
+            lhnchar -= 1;
+            // find 1st mismatch in rest of segment
+            const lsegchar = vseg >>> 24;
+            if ( lsegchar !== 1 ) {
+                for (;;) {
+                    if ( isegchar === lsegchar ) { break; }
+                    if ( lhnchar === 0 ) { break; }
+                    if ( this.buf[isegchar0+isegchar] !== this.buf[lhnchar-1] ) { break; }
+                    isegchar += 1;
+                    lhnchar -= 1;
+                }
+            }
+            // all segment characters matched
+            if ( isegchar === lsegchar ) {
+                inext = this.buf32[icell+1];
+                // needle remainder: no
+                if ( lhnchar === 0 ) {
+                    // boundary cell already present
+                    if ( inext === 0 || this.buf32[inext+2] === 0 ) { return 0; }
+                    // need boundary cell
+                    this.buf32[icell+1] = this.addCell(0, inext, 0);
+                }
                 // needle remainder: yes
-                if ( ihnchar !== 0 ) {
+                else {
                     if ( inext !== 0 ) {
                         icell = inext;
                         continue;
                     }
                     // boundary cell + needle remainder
-                    this.buf32[icell+1] = this.addCell(0, 0, 0);
-                    this.buf32[this.buf32[icell+1]+1] = this.addCell(0, 0, this.addSegment(ihnchar));
-                    return 1;
+                    inext = this.addCell(0, 0, 0);
+                    this.buf32[icell+1] = inext;
+                    this.buf32[inext+1] = this.addCell(0, 0, this.addSegment(lhnchar));
                 }
-                // needle remainder: no
-                // boundary cell already present
-                if ( inext === 0 || this.buf32[inext+2] === 0 ) { return 0; }
-                // need boundary cell
-                this.buf32[icell+1] = this.addCell(0, this.buf32[icell+1], 0);
-                return 1;
             }
-
-            // imismatch !== lsegchar
-            // split current cell
-            const isegchar = v & 0x00FFFFFF;
-            this.buf32[icell+2] = (imismatch << 24) | isegchar;
-            this.buf32[icell+1] = this.addCell(0, this.buf32[icell+1], (lsegchar - imismatch) << 24 | (isegchar + imismatch));
-            // needle remainder: yes
-            if ( ihnchar !== 0 ) {
-                this.buf32[this.buf32[icell+1]+0] = this.addCell(0, 0, this.addSegment(ihnchar));
-                return 1;
+            // some segment characters matched
+            else {
+                // split current cell
+                isegchar0 -= char0;
+                this.buf32[icell+2] = isegchar << 24 | isegchar0;
+                inext = this.addCell(
+                    0,
+                    this.buf32[icell+1],
+                    lsegchar - isegchar << 24 | isegchar0 + isegchar
+                );
+                this.buf32[icell+1] = inext;
+                // needle remainder: no = need boundary cell
+                if ( lhnchar === 0 ) {
+                    this.buf32[icell+1] = this.addCell(0, inext, 0);
+                }
+                // needle remainder: yes = need new cell for remaining characters
+                else {
+                    this.buf32[inext+0] = this.addCell(0, 0, this.addSegment(lhnchar));
+                }
             }
-            // needle remainder: no
-            this.buf32[icell+1] = this.addCell(0, this.buf32[icell+1], 0);
             return 1;
         }
     },
+    addWASM: null,
+    add: null,
 
     optimize: function() {
         this.shrinkBuf();
@@ -249,10 +273,13 @@ HNBigTrieContainer.prototype = {
         };
     },
 
-    fromIterable: function(hostnames) {
+    fromIterable: function(hostnames, add) {
+        if ( add === undefined ) {
+            add = 'add';
+        }
         const trieRef = this.create();
-        for ( let hn of hostnames ) {
-            this.setNeedle(hn).add(trieRef.iroot);
+        for ( const hn of hostnames ) {
+            trieRef[add](hn);
         }
         return trieRef;
     },
@@ -262,50 +289,28 @@ HNBigTrieContainer.prototype = {
     //--------------------------------------------------------------------------
 
     addCell: function(idown, iright, v) {
-        const icell = this.buf32[HNBIGTRIE_TRIE1_SLOT] >>> 2;
-        this.buf32[HNBIGTRIE_TRIE1_SLOT] += 12;
+        let icell = this.buf32[HNBIGTRIE_TRIE1_SLOT];
+        this.buf32[HNBIGTRIE_TRIE1_SLOT] = icell + 12;
+        icell >>>= 2;
         this.buf32[icell+0] = idown;
         this.buf32[icell+1] = iright;
         this.buf32[icell+2] = v;
         return icell;
     },
 
-    addSegment: function(len) {
-        if ( len === 0 ) { return 0; }
+    addSegment: function(lsegchar) {
+        if ( lsegchar === 0 ) { return 0; }
         let char1 = this.buf32[HNBIGTRIE_CHAR1_SLOT];
-        const ichar = char1 - this.buf32[HNBIGTRIE_CHAR0_SLOT];
-        let i = len;
-        while ( i-- ) {
-            this.buf[char1++] = this.buf[i];
-        }
+        const isegchar = char1 - this.buf32[HNBIGTRIE_CHAR0_SLOT];
+        let i = lsegchar;
+        do {
+            this.buf[char1++] = this.buf[--i];
+        } while ( i !== 0 );
         this.buf32[HNBIGTRIE_CHAR1_SLOT] = char1;
-        return (len << 24) | ichar;
-    },
-
-    indexOfMismatch: function(v, ineedle) {
-        const i0 = this.buf32[HNBIGTRIE_CHAR0_SLOT] + (v & 0x00FFFFFF);
-        if ( this.buf[i0] !== this.buf[ineedle-1] ) { return 0; }
-        let n = v >>> 24;
-        if ( n === 1 ) { return 1; }
-        if ( n > ineedle ) { n = ineedle; }
-        const i1 = i0 + n;
-        let i = i0 + 1;
-        let j = ineedle - 1;
-        while ( i < i1 ) {
-            j -= 1;
-            if ( this.buf[i] !== this.buf[j] ) { break; }
-            i += 1;
-        }
-        return i - i0;
+        return (lsegchar << 24) | isegchar;
     },
 
     growBuf: function() {
-        if (
-            (this.buf32[HNBIGTRIE_CHAR0_SLOT] - this.buf32[HNBIGTRIE_TRIE1_SLOT]) >= 24 &&
-            (this.buf.length - this.buf32[HNBIGTRIE_CHAR1_SLOT]) >= 256
-        ) {
-            return;
-        }
         const char0 = Math.max(
             (this.buf32[HNBIGTRIE_TRIE1_SLOT] + 24 + 65535) & ~65535,
             this.buf32[HNBIGTRIE_CHAR0_SLOT]
@@ -375,7 +380,12 @@ HNBigTrieContainer.prototype = {
             const memory = new WebAssembly.Memory({ initial: 1 });
             this.wasmInstancePromise = WebAssembly.instantiate(
                 module,
-                { imports: { memory } }
+                {
+                    imports: {
+                        memory,
+                        growBuf: this.growBuf.bind(this)
+                    }
+                }
             );
             this.wasmInstancePromise.then(instance => {
                 this.wasmMemory = memory;
@@ -387,8 +397,8 @@ HNBigTrieContainer.prototype = {
                 buf.set(this.buf);
                 this.buf = buf;
                 this.buf32 = new Uint32Array(this.buf.buffer);
-                this.matchesWASM = instance.exports.matches;
-                this.matches = this.matchesWASM;
+                this.matches = this.matchesWASM = instance.exports.matches;
+                this.add = this.addWASM = instance.exports.add;
             });
         }
         return this.wasmInstancePromise;
@@ -401,8 +411,8 @@ HNBigTrieContainer.prototype = {
     HNBigTrieContainer.wasmModulePromise = null;
 
     // Default to javascript version.
-    HNBigTrieContainer.prototype.matches =
-        HNBigTrieContainer.prototype.matchesJS;
+    HNBigTrieContainer.prototype.matches = HNBigTrieContainer.prototype.matchesJS;
+    HNBigTrieContainer.prototype.add = HNBigTrieContainer.prototype.addJS;
 
     if (
         typeof WebAssembly !== 'object' ||
@@ -473,6 +483,29 @@ HNBigTrieRef.prototype = {
         }
         return false;
     },
+    addJS: function(hn) {
+        if ( this.container.setNeedle(hn).addJS(this.iroot) === 1 ) {
+            this.size += 1;
+            return true;
+        }
+        return false;
+    },
+    addWASM: function(hn) {
+        if ( this.container.setNeedle(hn).addWASM(this.iroot) === 1 ) {
+            this.size += 1;
+            return true;
+        }
+        return false;
+    },
+    matches: function(needle) {
+        return this.container.setNeedle(needle).matches(this.iroot);
+    },
+    matchesJS: function(needle) {
+        return this.container.setNeedle(needle).matchesJS(this.iroot);
+    },
+    matchesWASM: function(needle) {
+        return this.container.setNeedle(needle).matchesWASM(this.iroot);
+    },
     [Symbol.iterator]: function() {
         return {
             value: undefined,
@@ -523,14 +556,5 @@ HNBigTrieRef.prototype = {
             forks: [],
             textDecoder: new TextDecoder()
         };
-    },
-    matches: function(needle) {
-        return this.container.setNeedle(needle).matches(this.iroot);
-    },
-    matchesJS: function(needle) {
-        return this.container.setNeedle(needle).matchesJS(this.iroot);
-    },
-    matchesWASM: function(needle) {
-        return this.container.setNeedle(needle).matchesWASM(this.iroot);
     },
 };

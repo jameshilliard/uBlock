@@ -72,17 +72,22 @@ var setBasedDictTest = function(haystack, needle) {
 
 /******************************************************************************/
 
-const hnBigTrieContainer = new HNBigTrieContainer();
+const hnBigTrieJS = new HNBigTrieContainer();
+const hnBigTrieWASM = new HNBigTrieContainer();
 
-var trieBasedDictCreate = function(hostnames) {
-    return hnBigTrieContainer.fromIterable(hostnames);
+const trieBasedDictCreateJS = function(hostnames) {
+    return hnBigTrieJS.fromIterable(hostnames, 'addJS');
 }
 
-var trieBasedDictTest = function(haystack, needle) {
+const trieBasedDictTest = function(haystack, needle) {
     return haystack.matchesJS(needle);
 };
 
-var trieBasedDictTestWASM = function(haystack, needle) {
+const trieBasedDictCreateWASM = function(hostnames) {
+    return hnBigTrieWASM.fromIterable(hostnames, 'addWASM');
+}
+
+const trieBasedDictTestWASM = function(haystack, needle) {
     return haystack.matchesWASM(needle);
 };
 
@@ -147,9 +152,13 @@ function initBenchmarks() {
             .add('  -           Set-based', function() {
                 createDict(setBasedDictCreate);
                 })
-            .add('  -          Trie-based', function() {
-                hnBigTrieContainer.reset();
-                createDict(trieBasedDictCreate);
+            .add('  -     Trie-based (JS)', function() {
+                hnBigTrieJS.reset();
+                createDict(trieBasedDictCreateJS);
+                })
+            .add('  -   Trie-based (WASM)', function() {
+                hnBigTrieWASM.reset();
+                createDict(trieBasedDictCreateWASM);
                 })
             .on('start', function() {
                 dicts = [];
@@ -199,12 +208,12 @@ function initBenchmarks() {
                 setDicts = [];
                 bigTrieDicts = [];
                 results = [];
-                hnBigTrieContainer.reset();
+                hnBigTrieJS.reset();
                 for ( const hostnameList of hostnameLists ) {
                     setDicts.push(setBasedDictCreate(hostnameList));
-                    bigTrieDicts.push(trieBasedDictCreate(hostnameList));
+                    bigTrieDicts.push(trieBasedDictCreateJS(hostnameList));
                 }
-                hnBigTrieContainer.optimize();
+                hnBigTrieJS.optimize();
                 stdout(gWhich, '');
                 stdout(
                     gWhich,
@@ -220,7 +229,7 @@ function initBenchmarks() {
                 })
             .on('complete', ( ) => {
                 setDicts = bigTrieDicts = results = [];
-                hnBigTrieContainer.reset();
+                hnBigTrieJS.reset();
                 exitBenchmark();
                 });
 
@@ -230,7 +239,10 @@ function initBenchmarks() {
 
 /******************************************************************************/
 
-hnBigTrieContainer.readyToUse().then(( ) => {
+Promise.all([
+    hnBigTrieJS.readyToUse(),
+    hnBigTrieWASM.readyToUse()
+]).then(( ) => {
     initBenchmarks();
 });
 
