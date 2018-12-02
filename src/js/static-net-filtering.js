@@ -20,7 +20,7 @@
 */
 
 /* jshint bitwise: false */
-/* global punycode, HNBigTrieContainer, hnTrieManager */
+/* global punycode, HNTrieContainer */
 
 'use strict';
 
@@ -738,42 +738,40 @@ registerFilterClass(FilterRegex);
 const FilterOrigin = function() {
 };
 
-FilterOrigin.prototype.wrapped = {
-    compile: function() {
-        return '';
+FilterOrigin.prototype = {
+    wrapped: {
+        compile: function() {
+            return '';
+        },
+        logData: function() {
+            return {
+                compiled: ''
+            };
+        },
+        match: function() {
+            return true;
+        }
+    },
+    matchOrigin: function() {
+        return true;
+    },
+    match: function(url, tokenBeg) {
+        return this.matchOrigin() && this.wrapped.match(url, tokenBeg);
     },
     logData: function() {
-        return {
-            compiled: ''
-        };
+        var out = this.wrapped.logData(),
+            domainOpt = this.toDomainOpt();
+        out.compiled = [ this.fid, domainOpt, out.compiled ];
+        if ( out.opts === undefined ) {
+            out.opts = 'domain=' + domainOpt;
+        } else {
+            out.opts += ',domain=' + domainOpt;
+        }
+        return out;
     },
-    match: function() {
-        return true;
-    }
-};
-
-FilterOrigin.prototype.matchOrigin = function() {
-    return true;
-};
-
-FilterOrigin.prototype.match = function(url, tokenBeg) {
-    return this.matchOrigin() && this.wrapped.match(url, tokenBeg);
-};
-
-FilterOrigin.prototype.logData = function() {
-    var out = this.wrapped.logData(),
-        domainOpt = this.toDomainOpt();
-    out.compiled = [ this.fid, domainOpt, out.compiled ];
-    if ( out.opts === undefined ) {
-        out.opts = 'domain=' + domainOpt;
-    } else {
-        out.opts += ',domain=' + domainOpt;
-    }
-    return out;
-};
-
-FilterOrigin.prototype.compile = function() {
-    return [ this.fid, this.toDomainOpt(), this.wrapped.compile() ];
+    compile: function() {
+        return [ this.fid, this.toDomainOpt(), this.wrapped.compile() ];
+    },
 };
 
 // *** start of specialized origin matchers
@@ -853,10 +851,12 @@ FilterOriginHitSet.prototype = Object.create(FilterOrigin.prototype, {
     },
     matchOrigin: {
         value: function() {
-            if ( hnTrieManager.isValidRef(this.oneOf) === false ) {
-                this.oneOf = hnTrieManager.fromDomainOpt(this.domainOpt);
+            if ( this.oneOf === null ) {
+                this.oneOf = FilterOrigin.trieContainer.fromIterable(
+                    this.domainOpt.split('|')
+                );
             }
-            return this.oneOf.matches(pageHostnameRegister) === 1;
+            return this.oneOf.matches(pageHostnameRegister) !== -1;
         }
     },
 });
@@ -885,12 +885,12 @@ FilterOriginMissSet.prototype = Object.create(FilterOrigin.prototype, {
     },
     matchOrigin: {
         value: function() {
-            if ( hnTrieManager.isValidRef(this.noneOf) === false ) {
-                this.noneOf = hnTrieManager.fromDomainOpt(
-                    this.domainOpt.replace(/~/g, '')
+            if ( this.noneOf === null ) {
+                this.noneOf = FilterOrigin.trieContainer.fromIterable(
+                    this.domainOpt.replace(/~/g, '').split('|')
                 );
             }
-            return this.noneOf.matches(pageHostnameRegister) === 0;
+            return this.noneOf.matches(pageHostnameRegister) === -1;
         }
     },
 });
@@ -926,8 +926,8 @@ FilterOriginMixedSet.prototype = Object.create(FilterOrigin.prototype, {
                     oneOf.push(hostname);
                 }
             }
-            this.oneOf = hnTrieManager.fromIterable(oneOf);
-            this.noneOf = hnTrieManager.fromIterable(noneOf);
+            this.oneOf = FilterOrigin.trieContainer.fromIterable(oneOf);
+            this.noneOf = FilterOrigin.trieContainer.fromIterable(noneOf);
         }
     },
     toDomainOpt: {
@@ -937,12 +937,10 @@ FilterOriginMixedSet.prototype = Object.create(FilterOrigin.prototype, {
     },
     matchOrigin: {
         value: function() {
-            if ( hnTrieManager.isValidRef(this.oneOf) === false ) {
-                this.init();
-            }
+            if ( this.oneOf === null ) { this.init(); }
             let needle = pageHostnameRegister;
-            return this.oneOf.matches(needle) === 1 &&
-                   this.noneOf.matches(needle) === 0;
+            return this.oneOf.matches(needle) !== -1 &&
+                   this.noneOf.matches(needle) === -1;
         }
     },
 });
@@ -988,6 +986,33 @@ FilterOrigin.load = function(args) {
     var f = FilterOrigin.matcherFactory(args[1]);
     f.wrapped = filterFromCompiledData(args[2]);
     return f;
+};
+
+FilterOrigin.trieContainer = (function() {
+    let trieDetails;
+    try {
+        trieDetails = JSON.parse(
+            vAPI.localStorage.getItem('FilterOrigin.trieDetails')
+        );
+    } catch(ex) {
+    }
+    return new HNTrieContainer(trieDetails);
+})();
+
+FilterOrigin.readyToUse = function() {
+    return FilterOrigin.trieContainer.readyToUse();
+};
+
+FilterOrigin.reset = function() {
+    return FilterOrigin.trieContainer.reset();
+};
+
+FilterOrigin.optimize = function() {
+    const trieDetails = FilterOrigin.trieContainer.optimize();
+    vAPI.localStorage.setItem(
+        'FilterOrigin.trieDetails',
+        JSON.stringify(trieDetails)
+    );
 };
 
 registerFilterClass(FilterOrigin);
@@ -1062,7 +1087,7 @@ FilterDataHolderEntry.load = function(data) {
 
 const FilterHostnameDict = function() {
     this.h = ''; // short-lived register
-    this.dict = FilterHostnameDict.trieContainer.create();
+    this.dict = FilterHostnameDict.trieContainer.createOne();
 };
 
 FilterHostnameDict.prototype = {
@@ -1086,14 +1111,10 @@ FilterHostnameDict.prototype = {
         };
     },
     compile: function() {
-        return [ this.fid, Array.from(this.dict) ];
+        return [ this.fid, FilterHostnameDict.trieContainer.compileOne(this.dict) ];
     },
 };
 
-// TODO: save/restore memory buffer size so as to minimize memory re-allocation
-// as tries are created/populated. Most likely scenario is that the size of the
-// memory buffer needed will be the same as the usage seen at last optimize()
-// call.
 FilterHostnameDict.trieContainer = (function() {
     let trieDetails;
     try {
@@ -1102,7 +1123,7 @@ FilterHostnameDict.trieContainer = (function() {
         );
     } catch(ex) {
     }
-    return new HNBigTrieContainer(trieDetails);
+    return new HNTrieContainer(trieDetails);
 })();
 
 FilterHostnameDict.readyToUse = function() {
@@ -1123,10 +1144,7 @@ FilterHostnameDict.optimize = function() {
 
 FilterHostnameDict.load = function(args) {
     const f = new FilterHostnameDict();
-    f.dict = FilterHostnameDict.trieContainer.create();
-    for ( const hn of args[1] ) {
-        f.dict.add(hn);
-    }
+    f.dict = FilterHostnameDict.trieContainer.loadOne(args[1]);
     return f;
 };
 
@@ -1989,7 +2007,7 @@ FilterContainer.prototype.reset = function() {
     this.filterParser.reset();
 
     // This will invalidate all hn tries throughout uBO:
-    hnTrieManager.reset();
+    FilterOrigin.reset();
     FilterHostnameDict.reset();
 
     // Runtime registers
@@ -2079,6 +2097,7 @@ FilterContainer.prototype.freeze = function() {
 
     this.filterParser.reset();
     this.goodFilters = new Set();
+    FilterOrigin.optimize();
     FilterHostnameDict.optimize();
     this.frozen = true;
 };
@@ -2089,9 +2108,7 @@ FilterContainer.prototype.freeze = function() {
 // on asynchronous operations (ex.: when loading a wasm module).
 
 FilterContainer.prototype.readyToUse = function() {
-    return Promise.all([
-        hnTrieManager.readyToUse()
-    ]);
+    return Promise.resolve();
 };
 
 /******************************************************************************/
@@ -2127,6 +2144,7 @@ FilterContainer.prototype.toSelfie = function() {
         allowFilterCount: this.allowFilterCount,
         blockFilterCount: this.blockFilterCount,
         discardedCount: this.discardedCount,
+        trieContainer: FilterHostnameDict.trieContainer.serialize(),
         categories: categoriesToSelfie(this.categories),
         dataFilters: dataFiltersToSelfie(this.dataFilters)
     };
@@ -2142,6 +2160,7 @@ FilterContainer.prototype.fromSelfie = function(selfie) {
     this.allowFilterCount = selfie.allowFilterCount;
     this.blockFilterCount = selfie.blockFilterCount;
     this.discardedCount = selfie.discardedCount;
+    FilterHostnameDict.trieContainer.unserialize(selfie.trieContainer);
 
     for ( let categoryEntry of selfie.categories ) {
         let tokenMap = new Map();
@@ -2159,8 +2178,6 @@ FilterContainer.prototype.fromSelfie = function(selfie) {
         }
         this.dataFilters.set(entry.tokenHash, entry);
     }
-
-    FilterHostnameDict.optimize();
 };
 
 /******************************************************************************/

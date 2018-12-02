@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
 <body style="font: 14px sans-serif">
-<h1>Benchmark of large hostname-lookup data structures: Set, HNBigTrie</h1>
+<h1>Benchmark of large hostname-lookup from small to large set: Set, HNTrie</h1>
 <p><button id="createBenchmark">Creation</button> <button id="lookupBenchmark">Lookup</button></p>
 <div id="results-0" style="white-space:pre;font-family:mono"></div>
 <div id="results-1" style="white-space:pre;font-family:mono"></div>
@@ -15,8 +15,8 @@
 <div id="results-5" style="white-space:pre;font-family:mono"></div>
 <div id="results-6" style="white-space:pre;font-family:mono"></div>
 
-<script src="https://raw.githack.com/gorhill/uBlock/bigtrie-wasm/src/js/hnbigtrie.js"></script>
-<!-- <script src="../../src/js/hnbigtrie.js"></script> -->
+<!-- <script src="https://raw.githack.com/gorhill/uBlock/bigtrie-wasm/src/js/hnbigtrie.js"></script> -->
+<script src="../../src/js/hnbigtrie.js"></script>
 <script src="hostname-pool.js"></script>
 
 <script src="https://cdn.jsdelivr.net/lodash/4.17.2/lodash.min.js"></script>
@@ -72,8 +72,8 @@ var setBasedDictTest = function(haystack, needle) {
 
 /******************************************************************************/
 
-const hnBigTrieJS = new HNBigTrieContainer();
-const hnBigTrieWASM = new HNBigTrieContainer();
+const hnBigTrieJS = new HNTrieContainer();
+const hnBigTrieWASM = new HNTrieContainer();
 
 const trieBasedDictCreateJS = function(hostnames) {
     return hnBigTrieJS.fromIterable(hostnames, 'addJS');
@@ -140,35 +140,49 @@ function exitBenchmark() {
 function initBenchmarks() {
     gBenchmarks.push((function() {
         let dicts = [];
+        let bigTrieDictsSerialized;
 
         const createDict = function(fn) {
+            const out = [];
             for ( let i = 0; i < hostnameLists.length; i++ ) {
-                dicts[i] = fn(hostnameLists[i]);
+                out[i] = fn(hostnameLists[i]);
             }
+            return out;
         };
 
         var bms = new Benchmark.Suite();
         bms
-            .add('  -           Set-based', function() {
-                createDict(setBasedDictCreate);
+            .add('  -                 Set-based', function() {
+                dicts = createDict(setBasedDictCreate);
                 })
-            .add('  -     Trie-based (JS)', function() {
+            .add('  -           Trie-based (JS)', function() {
                 hnBigTrieJS.reset();
-                createDict(trieBasedDictCreateJS);
+                dicts = createDict(trieBasedDictCreateJS);
                 })
-            .add('  -   Trie-based (WASM)', function() {
+            .add('  -         Trie-based (WASM)', function() {
                 hnBigTrieWASM.reset();
-                createDict(trieBasedDictCreateWASM);
+                dicts = createDict(trieBasedDictCreateWASM);
+                })
+            .add('  - Trie-based (unserialized)', function() {
+                hnBigTrieJS.reset();
+                hnBigTrieJS.unserialize(bigTrieDictsSerialized);
                 })
             .on('start', function() {
-                dicts = [];
+                hnBigTrieJS.reset();
+                createDict(trieBasedDictCreateJS);
+                bigTrieDictsSerialized = hnBigTrieJS.serialize();
                 stdout(gWhich, '');
                 stdout(gWhich, 'Create dictionaries\n');
                 })
             .on('cycle', function(event) {
                 stdout(gWhich, String(event.target) + '\n');
                 })
-            .on('complete', exitBenchmark);
+            .on('complete', function() {
+                dicts = [];
+                bigTrieDictsSerialized = undefined;
+                exitBenchmark();
+                });
+
         return bms;
     })());
 
