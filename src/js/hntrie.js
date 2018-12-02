@@ -95,7 +95,7 @@
     - Distinct trie reference support the iteration protocol, thus allowing
       to extract all the hostnames in the trie
 
-  It's primary purpose is to replace the use of Set() as a mean to hold
+  Its primary purpose is to replace the use of Set() as a mean to hold
   large number of hostnames (ex. FilterHostnameDict in static filtering
   engine).
 
