@@ -74,8 +74,11 @@
   2nd iteration: goal was to make matches() method wasm-able
     - https://github.com/gorhill/uBlock/blob/c3b0fd31f64bd7ffecdd282fb1208fe07aac3eb0/src/js/hntrie.js
     - Suitable for small to medium set of hostnames
-    - Distinct tries all share same buffer => reduced memory footprint
-      - https://stackoverflow.com/questions/45803829/memory-overhead-of-typed-arrays-vs-strings/45808835#45808835
+    - Distinct tries all share same buffer:
+      - Reduced memory footprint
+        - https://stackoverflow.com/questions/45803829/memory-overhead-of-typed-arrays-vs-strings/45808835#45808835
+      - Reusing needle character lookups for all tries
+        - This significantly reduce the number of String.charCodeAt() calls
     - Slightly improved creation time
 
   This is the 3rd iteration: goal was to make add() method wasm-able and
