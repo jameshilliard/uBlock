@@ -759,8 +759,8 @@ FilterOrigin.prototype = {
         return this.matchOrigin() && this.wrapped.match(url, tokenBeg);
     },
     logData: function() {
-        var out = this.wrapped.logData(),
-            domainOpt = this.toDomainOpt();
+        const out = this.wrapped.logData();
+        const domainOpt = this.toDomainOpt();
         out.compiled = [ this.fid, domainOpt, out.compiled ];
         if ( out.opts === undefined ) {
             out.opts = 'domain=' + domainOpt;
