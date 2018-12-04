@@ -218,7 +218,14 @@ HNTrieContainer.prototype = {
     matchesWASM: null,
     matches: null,
 
-    createOne: function() {
+    createOne: function(args) {
+        if ( Array.isArray(args) ) {
+            return new this.HNTrieRef(this, args[0], args[1]);
+        }
+        // grow buffer if needed
+        if ( (this.buf32[HNTRIE_CHAR0_SLOT] - this.buf32[HNTRIE_TRIE1_SLOT]) < 12 ) {
+            this.growBuf(12, 0);
+        }
         const iroot = this.buf32[HNTRIE_TRIE1_SLOT] >>> 2;
         this.buf32[HNTRIE_TRIE1_SLOT] += 12;
         this.buf32[iroot+0] = 0;
@@ -229,10 +236,6 @@ HNTrieContainer.prototype = {
 
     compileOne: function(trieRef) {
         return [ trieRef.iroot, trieRef.size ];
-    },
-
-    loadOne: function(args) {
-        return new this.HNTrieRef(this, args[0], args[1]);
     },
 
     addJS: function(iroot) {
@@ -249,7 +252,7 @@ HNTrieContainer.prototype = {
             (this.buf32[HNTRIE_CHAR0_SLOT] - this.buf32[HNTRIE_TRIE1_SLOT]) < 24 ||
             (this.buf.length - this.buf32[HNTRIE_CHAR1_SLOT]) < 256
         ) {
-            this.growBuf();
+            this.growBuf(24, 256);
         }
         //
         const char0 = this.buf32[HNTRIE_CHAR0_SLOT];
@@ -418,14 +421,14 @@ HNTrieContainer.prototype = {
         return (lsegchar << 24) | isegchar;
     },
 
-    growBuf: function() {
+    growBuf: function(trieGrow, charGrow) {
         const char0 = Math.max(
-            (this.buf32[HNTRIE_TRIE1_SLOT] + 24 + HNTRIE_PAGE_SIZE-1) & ~(HNTRIE_PAGE_SIZE-1),
+            (this.buf32[HNTRIE_TRIE1_SLOT] + trieGrow + HNTRIE_PAGE_SIZE-1) & ~(HNTRIE_PAGE_SIZE-1),
             this.buf32[HNTRIE_CHAR0_SLOT]
         );
         const char1 = char0 + this.buf32[HNTRIE_CHAR1_SLOT] - this.buf32[HNTRIE_CHAR0_SLOT];
         const bufLen = Math.max(
-            (char1 + 256 + HNTRIE_PAGE_SIZE-1) & ~(HNTRIE_PAGE_SIZE-1),
+            (char1 + charGrow + HNTRIE_PAGE_SIZE-1) & ~(HNTRIE_PAGE_SIZE-1),
             this.buf.length
         );
         this.resizeBuf(bufLen, char0);
@@ -501,7 +504,7 @@ HNTrieContainer.prototype = {
                 {
                     imports: {
                         memory,
-                        growBuf: this.growBuf.bind(this)
+                        growBuf: this.growBuf.bind(this, 24, 256)
                     }
                 }
             );

@@ -1085,9 +1085,9 @@ FilterDataHolderEntry.load = function(data) {
 
 // Dictionary of hostnames
 
-const FilterHostnameDict = function() {
+const FilterHostnameDict = function(args) {
     this.h = ''; // short-lived register
-    this.dict = FilterHostnameDict.trieContainer.createOne();
+    this.dict = FilterHostnameDict.trieContainer.createOne(args);
 };
 
 FilterHostnameDict.prototype = {
@@ -1143,9 +1143,7 @@ FilterHostnameDict.optimize = function() {
 };
 
 FilterHostnameDict.load = function(args) {
-    const f = new FilterHostnameDict();
-    f.dict = FilterHostnameDict.trieContainer.loadOne(args[1]);
-    return f;
+    return new FilterHostnameDict(args[1]);
 };
 
 registerFilterClass(FilterHostnameDict);

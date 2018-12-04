@@ -126,6 +126,7 @@ const testFlavor = function(hostnames, name, matchesFn, hitFn) {
 
 const hnBigTrieJS = new HNTrieContainer();
 const hnBigTrieWASM = new HNTrieContainer();
+const hnBigTrieUnserialized = new HNTrieContainer();
 
 Promise.all([
     hnBigTrieJS.readyToUse(),
@@ -172,6 +173,18 @@ Promise.all([
         }
     }
 
+    let selfie = hnBigTrieJS.serialize();
+    t0 = performance.now();
+    hnBigTrieUnserialized.unserialize(selfie);
+    const theTrieUnserialized = hnBigTrieUnserialized.createOne(hnBigTrieJS.compileOne(theTrieJS));
+    t1 = performance.now();
+    stdout('\xA0');
+    stdout(
+        'HNTrieContainer creation (unserialized) completed in ' +
+        (t1 - t0).toFixed(2) + ' ms'
+    );
+    selfie = undefined;
+
     document.getElementById('test').addEventListener('click', ( ) => {
         let parent = document.getElementById('stdout');
         while ( parent.childElementCount !== 0 ) {
@@ -197,6 +210,12 @@ Promise.all([
                 r => r >= 0
             );
         }
+        testFlavor(
+            hostnamePool,
+            'HNTrieContainer (unserialized)',
+            theTrieUnserialized.matchesJS.bind(theTrieUnserialized),
+            r => r >= 0
+        );
     });
 });
 
