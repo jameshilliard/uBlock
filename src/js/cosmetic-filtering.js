@@ -367,6 +367,7 @@ let FilterContainer = function() {
             [
             '.+?:has',
             '.+?:has-text',
+            '.+?:has-visible-text',
             '.+?:if',
             '.+?:if-not',
             '.+?:matches-css(?:-before|-after)?',

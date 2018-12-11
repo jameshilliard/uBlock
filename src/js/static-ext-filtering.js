@@ -154,6 +154,7 @@
                 'contains',
                 'has',
                 'has-text',
+                'has-visible-text',
                 'if',
                 'if-not',
                 'matches-css',
@@ -236,6 +237,7 @@
         var compileArgument = new Map([
             [ ':has', compileConditionalSelector ],
             [ ':has-text', compileText ],
+            [ ':has-visible-text', compileText ],
             [ ':if', compileConditionalSelector ],
             [ ':if-not', compileConditionalSelector ],
             [ ':matches-css', compileCSSDeclaration ],
@@ -265,6 +267,7 @@
                     raw.push(task[0], '(', task[1], ')');
                     break;
                 case ':has-text':
+                case ':has-visible-text':
                     if ( Array.isArray(task[1]) ) {
                         value = '/' + task[1][0] + '/' + task[1][1];
                     } else {

@@ -398,6 +398,41 @@ vAPI.DOMFilterer = (function() {
         return output;
     };
 
+    var getVisibleChildText = function(node) {
+        var childtext = "";
+        for (var i = 0; i < node.childNodes.length; i++) {
+            if (node.childNodes[i].nodeType == Node.TEXT_NODE) {
+                childtext = childtext.concat(node.childNodes[i].textContent);
+            } else if (node.childNodes[i].hasChildNodes()) {
+                var style = window.getComputedStyle(node.childNodes[i]);
+                if (style.fontSize === "0px") {
+                } else if (style.width === "0px") {
+                } else {
+                    childtext = childtext.concat(getVisibleChildText(node.childNodes[i]));
+                }
+            }
+        }
+        return childtext;
+    };
+
+    var PSelectorHasVisibleTextTask = function(task) {
+        var arg0 = task[1], arg1;
+        if ( Array.isArray(task[1]) ) {
+            arg1 = arg0[1]; arg0 = arg0[0];
+        }
+        this.needle = new RegExp(arg0, arg1);
+    };
+    PSelectorHasVisibleTextTask.prototype.exec = function(input) {
+        var output = [];
+        for ( var node of input ) {
+            var children = getVisibleChildText(node);
+            if ( this.needle.test(children) ) {
+                output.push(node);
+            }
+        }
+        return output;
+    };
+
     var PSelectorIfTask = function(task) {
         this.pselector = new PSelector(task[1]);
     };
@@ -482,6 +517,7 @@ vAPI.DOMFilterer = (function() {
             PSelector.prototype.operatorToTaskMap = new Map([
                 [ ':has', PSelectorIfTask ],
                 [ ':has-text', PSelectorHasTextTask ],
+                [ ':has-visible-text', PSelectorHasVisibleTextTask ],
                 [ ':if', PSelectorIfTask ],
                 [ ':if-not', PSelectorIfNotTask ],
                 [ ':matches-css', PSelectorMatchesCSSTask ],
